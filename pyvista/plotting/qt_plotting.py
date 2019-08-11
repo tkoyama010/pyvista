@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 log.setLevel('DEBUG')
 
 
-# dummy reference for when PyQt5 is not installed (i.e. readthedocs)
+# dummy reference for when PySide2 is not installed (i.e. readthedocs)
 has_pyqt = False
 class QVTKRenderWindowInteractor(object):
     pass
@@ -35,7 +35,7 @@ class QSlider(object):
     pass
 
 
-def pyqtSignal(*args, **kwargs):  # pragma: no cover
+def Signal(*args, **kwargs):  # pragma: no cover
     pass
 
 
@@ -47,7 +47,7 @@ class QFileDialog(object):
     pass
 
 
-def pyqtSlot(*args, **kwargs):
+def Slot(*args, **kwargs):
     """dummy function for environments without pyqt5"""
     return lambda *x: None
 
@@ -61,11 +61,11 @@ class QObject(object):
 
 
 try:
-    from PyQt5.QtCore import pyqtSignal, pyqtSlot, QObject, QTimer
+    from PySide2.QtCore import Signal, Slot, QObject, QTimer
     from vtk.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
-    from PyQt5 import QtGui
-    from PyQt5 import QtCore
-    from PyQt5.QtWidgets import (QMenuBar, QVBoxLayout, QHBoxLayout, QDoubleSpinBox,
+    from PySide2 import QtGui
+    from PySide2 import QtCore
+    from PySide2.QtWidgets import (QMenuBar, QVBoxLayout, QHBoxLayout, QDoubleSpinBox,
                                  QFrame, QMainWindow, QSlider,
                                  QSpinBox, QHBoxLayout, QDialog,
                                  QFormLayout, QGroupBox, QFileDialog)
@@ -79,7 +79,7 @@ class FileDialog(QFileDialog):
     Generic file query that emits a signal when a file is selected and
     the dialog was property closed.
     """
-    dlg_accepted = pyqtSignal(str)
+    dlg_accepted = Signal(str)
 
     def __init__(self, parent=None, filefilter=None, save_mode=True, show=True,
                  callback=None, directory=False):
@@ -207,8 +207,8 @@ class RangeGroup(QHBoxLayout):
 
 class ScaleAxesDialog(QDialog):
     """ Dialog to control axes scaling """
-    accepted = pyqtSignal(float)
-    signal_close = pyqtSignal()
+    accepted = Signal(float)
+    signal_close = Signal()
 
     def __init__(self, parent, plotter, show=True):
         super(ScaleAxesDialog, self).__init__(parent)
@@ -280,13 +280,13 @@ class QtInteractor(QVTKRenderWindowInteractor, BasePlotter):
         Title of plotting window.
 
     """
-    render_trigger = pyqtSignal()
+    render_trigger = Signal()
     allow_quit_keypress = True
 
     def __init__(self, parent=None, title=None, shape=(1, 1), off_screen=None, **kwargs):
         """ Initialize Qt interactor """
         if not has_pyqt:
-            raise AssertionError('Requires PyQt5')
+            raise AssertionError('Requires PySide2')
         QVTKRenderWindowInteractor.__init__(self, parent)
         BasePlotter.__init__(self, shape=shape, title=title)
         self.parent = parent
@@ -343,7 +343,7 @@ class BackgroundPlotter(QtInteractor):
     def __init__(self, show=True, app=None, shape=(1, 1), window_size=None,
                  off_screen=None, **kwargs):
         if not has_pyqt:
-            raise AssertionError('Requires PyQt5')
+            raise AssertionError('Requires PySide2')
         self.active = True
         self.saved_camera_positions = []
         self.counters = []
@@ -367,7 +367,7 @@ class BackgroundPlotter(QtInteractor):
 
         # run within python
         if app is None:
-            from PyQt5.QtWidgets import QApplication
+            from PySide2.QtWidgets import QApplication
             app = QApplication.instance()
             if not app:  # pragma: no cover
                 app = QApplication([''])
@@ -562,7 +562,7 @@ class BackgroundPlotter(QtInteractor):
             return self.disable_parallel_projection()
         return self.enable_parallel_projection()
 
-    @pyqtSlot()
+    @Slot()
     def _render(self):
         super(BackgroundPlotter, self)._render()
         self.update_app_icon()
@@ -611,7 +611,7 @@ class BackgroundPlotter(QtInteractor):
 
 
 class MainWindow(QMainWindow):
-    signal_close = pyqtSignal()
+    signal_close = Signal()
 
     def __init__(self, parent=None):
         super(MainWindow, self).__init__(parent)
@@ -622,7 +622,7 @@ class MainWindow(QMainWindow):
 
 
 class Counter(QObject):
-    signal_finished = pyqtSignal()
+    signal_finished = Signal()
 
     def __init__(self, count):
         super(Counter, self).__init__()
@@ -634,7 +634,7 @@ class Counter(QObject):
         else:
             raise ValueError('count is not strictly positive.')
 
-    @pyqtSlot()
+    @Slot()
     def decrease(self):
         self.count -= 1
         if self.count <= 0:

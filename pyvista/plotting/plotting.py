@@ -14,15 +14,17 @@ import vtk
 from vtk.util import numpy_support as VN
 
 import pyvista
-from pyvista.utilities import (convert_array, convert_string_array, get_array,
-                               is_pyvista_dataset, numpy_to_texture,
+from pyvista.utilities import (convert_array, convert_string_array,
+                               get_array, is_pyvista_dataset, numpy_to_texture,
                                raise_not_matching, wrap)
 
 from .colors import get_cmap_safe
 from .export_vtkjs import export_plotter_vtkjs
 from .mapper import make_mapper
+from .picking import PickingHelper
 from .theme import *
 from .tools import *
+from .widgets import WidgetHelper
 
 _ALL_PLOTTERS = {}
 
@@ -40,7 +42,7 @@ log.setLevel('CRITICAL')
 
 
 
-class BasePlotter(object):
+class BasePlotter(PickingHelper, WidgetHelper):
     """
     To be used by the Plotter and QtInteractor classes.
 
@@ -129,6 +131,67 @@ class BasePlotter(object):
         for renderer in self.renderers:
             self.lighting.AddLightsToRenderer(renderer)
             renderer.LightFollowCameraOn()
+
+        # Key bindings
+        self.reset_key_events()
+
+
+    def add_key_event(self, key, callback):
+        """Add a function to callback when the given key is pressed. These are
+        non-unique - thus a key could map to many callback functions.
+
+        The callback function must not have any arguments.
+
+        Parameters
+        ----------
+        key : str
+            The key to trigger the event
+
+        callback : callable
+            A callable that takes no arguments
+        """
+        self._key_press_event_callbacks[key].append(callback)
+
+
+    def reset_key_events(self):
+        """Reset all of the key press events to their defaults."""
+        self._key_press_event_callbacks = collections.defaultdict(list)
+
+        def _close_callback():
+            """ Make sure a screenhsot is acquired before closing"""
+            self.q_pressed = True
+            # Grab screenshot right before renderer closes
+            self.last_image = self.screenshot(True, return_img=True)
+
+        self.add_key_event('q', _close_callback)
+        b_left_down_callback = lambda: self.iren.AddObserver('LeftButtonPressEvent', self.left_button_down)
+        self.add_key_event('b', b_left_down_callback)
+        self.add_key_event('v', lambda: self.isometric_view_interactive())
+
+
+    def key_press_event(self, obj, event):
+        """ Listens for key press event """
+        key = self.iren.GetKeySym()
+        log.debug('Key %s pressed' % key)
+        if key in self._key_press_event_callbacks.keys():
+            # Note that defaultdict's will never throw a key error
+            callbacks = self._key_press_event_callbacks[key]
+            for func in callbacks:
+                func()
+
+
+    def left_button_down(self, obj, event_type):
+        """Register the event for a left button down click"""
+        # Get 2D click location on window
+        click_pos = self.iren.GetEventPosition()
+
+        # Get corresponding click location in the 3D plot
+        picker = vtk.vtkWorldPointPicker()
+        picker.Pick(click_pos[0], click_pos[1], 0, self.renderer)
+        self.pickpoint = np.asarray(picker.GetPickPosition()).reshape((-1, 3))
+        if np.any(np.isnan(self.pickpoint)):
+            self.pickpoint[:] = 0
+
 
     def update_style(self):
         if not hasattr(self, '_style'):
@@ -290,32 +353,6 @@ class BasePlotter(object):
         else:
             self.add_axes()
 
-    def key_press_event(self, obj, event):
-        """ Listens for key press event """
-        key = self.iren.GetKeySym()
-        log.debug('Key %s pressed' % key)
-        if key == 'q':
-            self.q_pressed = True
-            # Grab screenshot right before renderer closes
-            self.last_image = self.screenshot(True, return_img=True)
-        elif key == 'b':
-            self.observer = self.iren.AddObserver('LeftButtonPressEvent',
-                                                  self.left_button_down)
-        elif key == 'v':
-            self.isometric_view_interactive()
-
-    def left_button_down(self, obj, event_type):
-        """Register the event for a left button down click"""
-        # Get 2D click location on window
-        click_pos = self.iren.GetEventPosition()
-
-        # Get corresponding click location in the 3D plot
-        picker = vtk.vtkWorldPointPicker()
-        picker.Pick(click_pos[0], click_pos[1], 0, self.renderer)
-        self.pickpoint = np.asarray(picker.GetPickPosition()).reshape((-1, 3))
-        if np.any(np.isnan(self.pickpoint)):
-            self.pickpoint[:] = 0
-
     def isometric_view_interactive(self):
         """ sets the current interactive render window to isometric view """
         interactor = self.iren.GetInteractorStyle()
@@ -363,7 +400,7 @@ class BasePlotter(object):
                  clim=None, show_edges=None, edge_color=None,
                  point_size=5.0, line_width=None, opacity=1.0,
                  flip_scalars=False, lighting=None, n_colors=256,
-                 interpolate_before_map=False, cmap=None, label=None,
+                 interpolate_before_map=True, cmap=None, label=None,
                  reset_camera=None, scalar_bar_args=None, show_scalar_bar=None,
                  stitle=None, multi_colors=False, name=None, texture=None,
                  render_points_as_spheres=None, render_lines_as_tubes=False,
@@ -371,7 +408,7 @@ class BasePlotter(object):
                  specular_power=100.0, nan_color=None, nan_opacity=1.0,
                  loc=None, backface_culling=False, rgb=False, categories=False,
                  use_transparency=False, below_color=None, above_color=None,
-                 annotations=None, **kwargs):
+                 annotations=None, pickable=True, **kwargs):
         """
         Adds any PyVista/VTK mesh or dataset that PyVista can wrap to the
         scene. This method using a mesh representation to view the surfaces
@@ -450,8 +487,9 @@ class BasePlotter(object):
             The scalar bar will also have this many colors.
 
         interpolate_before_map : bool, optional
-            Enabling makes for a smoother scalar display.  Default
-            False
+            Enabling makes for a smoother scalar display.  Default is True.
+            When False, OpenGL will interpolate the mapped colors which can
+            result is showing colors that are not present in the color map.
 
         cmap : str, optional
            Name of the Matplotlib colormap to us when mapping the ``scalars``.
@@ -562,6 +600,9 @@ class BasePlotter(object):
             Pass a dictionary of annotations. Keys are the float values in the
             scalar range to annotate on the scalar bar and the values are the
             the string annotations.
+
+        pickable : bool
+            Set whether this mesh is pickable
 
         Returns
         -------
@@ -728,7 +769,8 @@ class BasePlotter(object):
 
         actor, prop = self.add_actor(self.mapper,
                                      reset_camera=reset_camera,
-                                     name=name, loc=loc, culling=backface_culling)
+                                     name=name, loc=loc, culling=backface_culling,
+                                     pickable=pickable)
 
         # Make sure scalars is a numpy array after this point
         original_scalar_name = None
@@ -1003,7 +1045,7 @@ class BasePlotter(object):
                    loc=None, backface_culling=False, multi_colors=False,
                    blending='composite', mapper='fixed_point',
                    stitle=None, scalar_bar_args=None, show_scalar_bar=None,
-                   annotations=None, **kwargs):
+                   annotations=None, pickable=True, **kwargs):
         """
         Adds a volume, rendered using a fixed point ray cast mapper by default.
 
@@ -1185,7 +1227,7 @@ class BasePlotter(object):
                                     reset_camera=reset_camera, name=next_name,
                                     ambient=ambient, categories=categories, loc=loc,
                                     backface_culling=backface_culling, clim=clim,
-                                    mapper=mapper, **kwargs)
+                                    mapper=mapper, pickable=pickable, **kwargs)
 
                 actors.append(a)
             return actors
@@ -1362,7 +1404,8 @@ class BasePlotter(object):
         self.volume.SetProperty(prop)
 
         actor, prop = self.add_actor(self.volume, reset_camera=reset_camera,
-                                     name=name, loc=loc, culling=backface_culling)
+                                     name=name, loc=loc, culling=backface_culling,
+                                     pickable=pickable)
 
 
         # Add scalar bar
@@ -1496,7 +1539,7 @@ class BasePlotter(object):
         return True
 
     def add_actor(self, uinput, reset_camera=False, name=None, loc=None,
-                  culling=False):
+                  culling=False, pickable=True):
         """
         Adds an actor to render window.  Creates an actor if input is
         a mapper.
@@ -1532,7 +1575,8 @@ class BasePlotter(object):
         # add actor to the correct render window
         self._active_renderer_index = self.loc_to_index(loc)
         renderer = self.renderers[self._active_renderer_index]
-        return renderer.add_actor(uinput, reset_camera, name, culling)
+        return renderer.add_actor(uinput=uinput, reset_camera=reset_camera,
+                    name=name, culling=culling, pickable=pickable)
 
     def loc_to_index(self, loc):
         """
@@ -2224,7 +2268,7 @@ class BasePlotter(object):
         else:
             self.scalar_bar.SetDrawFrame(False)
 
-        self.add_actor(self.scalar_bar, reset_camera=False)
+        self.add_actor(self.scalar_bar, reset_camera=False, pickable=False)
 
     def update_scalars(self, scalars, mesh=None, render=True):
         """
@@ -2314,6 +2358,8 @@ class BasePlotter(object):
     def close(self):
         """ closes render window """
         # must close out widgets first
+        super(BasePlotter, self).close()
+
         if hasattr(self, 'axes_widget'):
             del self.axes_widget
 
@@ -2449,7 +2495,7 @@ class BasePlotter(object):
         self.textActor.GetTextProperty().SetFontFamily(FONT_KEYS[font])
         self.textActor.GetTextProperty().SetShadow(shadow)
 
-        self.add_actor(self.textActor, reset_camera=False, name=name, loc=loc)
+        self.add_actor(self.textActor, reset_camera=False, name=name, loc=loc, pickable=False)
         return self.textActor
 
     def open_movie(self, filename, framerate=24):
@@ -2607,7 +2653,7 @@ class BasePlotter(object):
         self.scalar_bar.GetProperty().LightingOff()
 
         # Add to renderer
-        self.add_actor(self.scalar_bar, reset_camera=False, name=name)
+        self.add_actor(self.scalar_bar, reset_camera=False, name=name, pickable=False)
         return self.scalar_bar
 
     def remove_scalar_bar(self):
@@ -2621,7 +2667,8 @@ class BasePlotter(object):
                          font_family=None, shadow=False,
                          show_points=True, point_color=None, point_size=5,
                          name=None, shape_color='grey', shape='rounded_rect',
-                         fill_shape=True, margin=3, shape_opacity=1.0, **kwargs):
+                         fill_shape=True, margin=3, shape_opacity=1.0,
+                         pickable=True, **kwargs):
         """
         Creates a point actor with one label from list labels assigned to
         each point.
@@ -2775,11 +2822,13 @@ class BasePlotter(object):
         else:
             style = 'surface'
         self.add_mesh(vtkpoints, style=style, color=point_color,
-                      point_size=point_size, name='{}-points'.format(name))
+                      point_size=point_size, name='{}-points'.format(name),
+                      pickable=pickable)
 
         labelActor = vtk.vtkActor2D()
         labelActor.SetMapper(labelMapper)
-        self.add_actor(labelActor, reset_camera=False, name='{}-lables'.format(name))
+        self.add_actor(labelActor, reset_camera=False,
+                       name='{}-lables'.format(name), pickable=False)
 
         return labelMapper
 
@@ -3032,7 +3081,7 @@ class BasePlotter(object):
             self.legend.BorderOff()
 
         # Add to renderer
-        self.add_actor(self.legend, reset_camera=False, name=name)
+        self.add_actor(self.legend, reset_camera=False, name=name, pickable=False)
         return self.legend
 
     @property
@@ -3138,137 +3187,13 @@ class BasePlotter(object):
             self.remove_actor(self.legend, reset_camera=False)
             self._render()
 
-    def get_pick_position(self):
-        """Get the pick position/area as x0, y0, x1, y1"""
-        return self.renderer.get_pick_position()
-
-    def enable_cell_picking(self, mesh=None, callback=None, through=True,
-                            show=True, show_message=True, style='wireframe',
-                            line_width=5, color='pink', font_size=18, **kwargs):
-        """
-        Enables picking of cells.  Press r to enable retangle based
-        selection.  Press "r" again to turn it off.  Selection will be
-        saved to self.picked_cells.
-        Uses last input mesh for input
-
-        Warning
-        -------
-        Visible cell picking (``through=False``) is known to not perfrom well
-        and produce incorrect selections on non-triangulated meshes if using
-        any grpahics card other than NVIDIA. A warning will be thrown if the
-        mesh is not purely triangles when using visible cell selection.
-
-        Parameters
-        ----------
-        mesh : vtk.UnstructuredGrid, optional
-            UnstructuredGrid grid to select cells from.  Uses last
-            input grid by default.
-        callback : function, optional
-            When input, calls this function after a selection is made.
-            The picked_cells are input as the first parameter to this function.
-        through : bool, optional
-            When True (default) the picker will select all cells through the
-            mesh. When False, the picker will select only visible cells on the
-            mesh's surface.
-        show : bool
-            Show the selection interactively
-        show_message : bool, str
-            Show the message about how to use the cell picking tool. If this
-            is a string, that will be the message shown.
-        kwargs : optional
-            All remaining keyword arguments are used to control how the
-            selection is intereactively displayed
-        """
-        if hasattr(self, 'notebook') and self.notebook:
-            raise AssertionError('Cell picking not available in notebook plotting')
-        if mesh is None:
-            if not hasattr(self, 'mesh'):
-                raise Exception('Input a mesh into the Plotter class first or '
-                                + 'or set it in this function')
-            mesh = self.mesh
-
-
-        def end_pick_helper(picker, event_id):
-            if show:
-                # Use try incase selection is empty
-                try:
-                    self.add_mesh(self.picked_cells, name='_cell_picking_selection',
-                        style=style, color=color, line_width=line_width, **kwargs)
-                except RuntimeError:
-                    pass
-
-            if callback is not None and self.picked_cells.n_cells > 0:
-                callback(self.picked_cells)
-
-            # TODO: Deactivate selection tool
-            return
-
-
-        def through_pick_call_back(picker, event_id):
-            extract = vtk.vtkExtractGeometry()
-            mesh.cell_arrays['orig_extract_id'] = np.arange(mesh.n_cells)
-            extract.SetInputData(mesh)
-            extract.SetImplicitFunction(picker.GetFrustum())
-            extract.Update()
-            self.picked_cells = pyvista.wrap(extract.GetOutput())
-            return end_pick_helper(picker, event_id)
-
-
-        def visible_pick_call_back(picker, event_id):
-            x0,y0,x1,y1 = self.get_pick_position()
-            selector = vtk.vtkOpenGLHardwareSelector()
-            selector.SetFieldAssociation(vtk.vtkDataObject.FIELD_ASSOCIATION_CELLS)
-            selector.SetRenderer(self.renderer)
-            selector.SetArea(x0,y0,x1,y1)
-            cellids = selector.Select().GetNode(0)
-            if cellids is None:
-                # No selection
-                return
-            selection = vtk.vtkSelection()
-            selection.AddNode(cellids)
-            extract = vtk.vtkExtractSelectedIds()
-            extract.SetInputData(0, mesh)
-            extract.SetInputData(1, selection)
-            extract.Update()
-            self.picked_cells = pyvista.wrap(extract.GetOutput())
-            return end_pick_helper(picker, event_id)
-
-
-        area_picker = vtk.vtkRenderedAreaPicker()
-        if through:
-            area_picker.AddObserver(vtk.vtkCommand.EndPickEvent, through_pick_call_back)
-        else:
-            # check if mesh is triangulated or not
-            # Reference:
-            #     https://github.com/pyvista/pyvista/issues/277
-            #     https://github.com/pyvista/pyvista/pull/281
-            message = "Surface picking non-triangulated meshes is known to "\
-                      "not work properly with non-NVIDIA GPUs. Please "\
-                      "consider triangulating your mesh:\n"\
-                      "\t`.extract_geometry().tri_filter()`"
-            if (not isinstance(mesh, pyvista.PolyData) or
-                    mesh.faces.size % 4 or
-                    not np.all(mesh.faces.reshape(-1, 4)[:,0] == 3)):
-                logging.warning(message)
-            area_picker.AddObserver(vtk.vtkCommand.EndPickEvent, visible_pick_call_back)
-
-        self.enable_rubber_band_style()
-        self.iren.SetPicker(area_picker)
-
-        # Now add text about cell-selection
-        if show_message:
-            if show_message == True:
-                show_message = "Press R to toggle selection tool"
-            self.add_text(str(show_message), font_size=font_size, name='_cell_picking_message')
-        return
-
 
     def generate_orbital_path(self, factor=3., n_points=20, viewup=None, shift=0.0):
         """Genrates an orbital path around the data scene
 
         Parameters
         ----------
-        facotr : float
+        factor : float
             A scaling factor when biulding the orbital extent
 
         n_points : int

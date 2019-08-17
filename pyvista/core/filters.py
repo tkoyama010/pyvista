@@ -32,18 +32,9 @@ from vtk.util.numpy_support import (numpy_to_vtk, numpy_to_vtkIdTypeArray,
                                     vtk_to_numpy)
 
 import pyvista
-from pyvista.utilities import (CELL_DATA_FIELD, POINT_DATA_FIELD,
+from pyvista.utilities import (CELL_DATA_FIELD, POINT_DATA_FIELD, NORMALS,
                                generate_plane, get_array, is_inside_bounds,
                                wrap)
-
-NORMALS = {
-    'x': [1, 0, 0],
-    'y': [0, 1, 0],
-    'z': [0, 0, 1],
-    '-x': [-1, 0, 0],
-    '-y': [0, -1, 0],
-    '-z': [0, 0, -1],
-}
 
 
 def _get_output(algorithm, iport=0, iconnection=0, oport=0, active_scalar=None,
@@ -159,12 +150,11 @@ class DataSetFilters(object):
         if len(bounds) == 3:
             xmin, xmax, ymin, ymax, zmin, zmax = dataset.bounds
             bounds = (xmin,xmin+bounds[0], ymin,ymin+bounds[1], zmin,zmin+bounds[2])
-        if not isinstance(bounds, collections.Iterable) or len(bounds) != 6:
-            raise AssertionError('Bounds must be a length 6 iterable of floats')
-        xmin, xmax, ymin, ymax, zmin, zmax = bounds
+        if not isinstance(bounds, collections.Iterable) or not (len(bounds) == 6 or len(bounds) == 12):
+            raise AssertionError('Bounds must be a length 6 iterable of floats.')
         alg = vtk.vtkBoxClipDataSet()
         alg.SetInputDataObject(dataset)
-        alg.SetBoxClip(xmin, xmax, ymin, ymax, zmin, zmax)
+        alg.SetBoxClip(*bounds)
         port = 0
         if invert:
             # invert the clip if needed
@@ -1292,7 +1282,7 @@ class DataSetFilters(object):
                     max_steps=2000, terminal_speed=1e-12, max_error=1e-6,
                     max_time=None, compute_vorticity=True, rotation_scale=1.0,
                     interpolator_type='point', start_position=(0.0, 0.0, 0.0),
-                    return_source=False):
+                    return_source=False, pointa=None, pointb=None):
         """Integrate a vector field to generate streamlines. The integration is
         performed using a specified integrator, by default Runge-Kutta2.
         This supports integration through any type of dataset.
@@ -1392,6 +1382,10 @@ class DataSetFilters(object):
         return_source : bool
             Return the source particles as :class:`pyvista.PolyData` as well as the
             streamlines. This will be the second value returned if ``True``.
+
+        pointa, pointb : tuple(flaot)
+            The coordinates of a start and end point for a line source. This
+            will override the sphere point source.
         """
         integration_direction = str(integration_direction).strip().lower()
         if integration_direction not in ['both', 'back', 'backward', 'forward']:
@@ -1415,10 +1409,16 @@ class DataSetFilters(object):
             source_center = dataset.center
         if source_radius is None:
             source_radius = dataset.length / 10.0
-        source = vtk.vtkPointSource()
-        source.SetNumberOfPoints(n_points);
-        source.SetCenter(source_center);
-        source.SetRadius(source_radius);
+        if pointa is not None and pointb is not None:
+            source = vtk.vtkLineSource()
+            source.SetPoint1(pointa)
+            source.SetPoint2(pointb)
+            source.SetResolution(n_points)
+        else:
+            source = vtk.vtkPointSource()
+            source.SetCenter(source_center)
+            source.SetRadius(source_radius)
+            source.SetNumberOfPoints(n_points);
         # Build the algorithm
         alg = vtk.vtkStreamTracer()
         # Inputs
@@ -3250,14 +3250,79 @@ class PolyDataFilters(DataSetFilters):
             mesh = poly_data
         # Make plane
         plane = generate_plane(normal, origin)
-        print(plane.GetNormal())
-        print(plane.GetOrigin())
         # Perform projection in place on the copied mesh
         f = lambda p: plane.ProjectPoint(p, p)
         np.apply_along_axis(f, 1, mesh.points)
         if not inplace:
             return mesh
         return
+
+
+    def ribbon(poly_data, width=None, scalars=None, angle=0.0, factor=2.0,
+               normal=None, tcoords=False, preference='points'):
+        """Create a ribbon of the lines in this dataset.
+
+        Note
+        ----
+        If there are no lines in the input dataset, then the output will be
+        an empty PolyData mesh.
+
+        Parameters
+        ----------
+        width : float
+            Set the "half" width of the ribbon. If the width is allowed to
+            vary, this is the minimum width. The default is 10% the length
+
+        scalars : str, optional
+            String name of the scalars array to use to vary the ribbon width.
+            This is only used if a scalars array is specified.
+
+        angle : float
+            Set the offset angle of the ribbon from the line normal. (The
+            angle is expressed in degrees.) The default is 0.0
+
+        factor : float
+            Set the maximum ribbon width in terms of a multiple of the
+            minimum width. The default is 2.0
+
+        normal : tuple(float), optional
+            Normal to use as default
+
+        tcoords : bool, str, optional
+            If True, generate texture coordinates along the ribbon. This can
+            also be specified to generate the texture coordinates in the
+            following ways: ``'length'``, ``'normalized'``,
+        """
+        if scalars is not None:
+            arr, field = get_array(poly_data, scalars, preference=preference, info=True)
+        if width is None:
+            width = poly_data.length * 0.1
+        alg = vtk.vtkRibbonFilter()
+        alg.SetInputDataObject(poly_data)
+        alg.SetWidth(width)
+        if normal is not None:
+            alg.SetUseDefaultNormal(True)
+            alg.SetDefaultNormal(normal)
+        alg.SetAngle(angle)
+        if scalars is not None:
+            alg.SetVaryWidth(True)
+            alg.SetInputArrayToProcess(0, 0, 0, field, scalars) # args: (idx, port, connection, field, name)
+            alg.SetWidthFactor(factor)
+        else:
+            alg.SetVaryWidth(False)
+        if tcoords:
+            alg.SetGenerateTCoords(True)
+            if isinstance(tcoords, str):
+                if tcoords.lower() == 'length':
+                    alg.SetGenerateTCoordsToUseLength()
+                elif tcoords.lower() == 'normalized':
+                    alg.SetGenerateTCoordsToNormalizedLength()
+            else:
+                alg.SetGenerateTCoordsToUseLength()
+        else:
+            alg.SetGenerateTCoordsToOff()
+        alg.Update()
+        return _get_output(alg)
 
 
 class UnstructuredGridFilters(DataSetFilters):

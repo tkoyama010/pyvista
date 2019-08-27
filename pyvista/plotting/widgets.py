@@ -111,8 +111,6 @@ class WidgetHelper(object):
             All additional keyword arguments are passed to ``add_mesh`` to
             control how the mesh is displayed.
         """
-        if isinstance(mesh, pyvista.MultiBlock):
-            raise TypeError('MultiBlock datasets are not supported for box widget clipping.')
         name = kwargs.pop('name', str(hex(id(mesh))))
         kwargs.setdefault('clim', mesh.get_data_range(kwargs.get('scalars', None)))
 
@@ -126,7 +124,8 @@ class WidgetHelper(object):
                 bounds.append(plane.GetOrigin())
 
             self.box_clipped_mesh = mesh.clip_box(bounds=bounds, invert=invert)
-            self.add_mesh(self.box_clipped_mesh, name=name, **kwargs)
+            self.add_mesh(self.box_clipped_mesh, name=name, reset_camera=False,
+                          **kwargs)
 
         self.enable_box_widget(callback=callback, bounds=mesh.bounds,
                 factor=1.25, rotation_enabled=rotation_enabled,
@@ -182,6 +181,8 @@ class WidgetHelper(object):
         def _the_callback(plane_widget, event_id):
             the_plane = vtk.vtkPlane()
             plane_widget.GetPlane(the_plane)
+            normal = the_plane.GetNormal()
+            origin = the_plane.GetOrigin()
             if hasattr(callback, '__call__'):
                 try_callback(callback, normal, origin)
             return
@@ -242,17 +243,16 @@ class WidgetHelper(object):
             All additional keyword arguments are passed to ``add_mesh`` to
             control how the mesh is displayed.
         """
-        if isinstance(mesh, pyvista.MultiBlock):
-            raise TypeError('MultiBlock datasets are not supported for plane widget clipping.')
         name = kwargs.pop('name', str(hex(id(mesh))))
         kwargs.setdefault('clim', mesh.get_data_range(kwargs.get('scalars', None)))
 
         actor = self.add_mesh(mesh, name=name, **kwargs)
 
         def callback(normal, origin):
-            self.plane_clipped_mesh = pyvista.DataSetFilters.clip(mesh,
-                            normal=normal, origin=origin, invert=invert)
-            self.add_mesh(self.plane_clipped_mesh, name=name, **kwargs)
+            self.plane_clipped_mesh = mesh.clip(normal=normal, origin=origin,
+                                                invert=invert)
+            self.add_mesh(self.plane_clipped_mesh, name=name,
+                          reset_camera=False, **kwargs)
 
         self.enable_plane_widget(callback=callback, bounds=mesh.bounds,
                                  factor=1.25, normal=normal, color=widget_color)
@@ -288,8 +288,6 @@ class WidgetHelper(object):
             All additional keyword arguments are passed to ``add_mesh`` to
             control how the mesh is displayed.
         """
-        if isinstance(mesh, pyvista.MultiBlock):
-            raise TypeError('MultiBlock datasets are not supported for plane widget clipping.')
         name = kwargs.pop('name', str(hex(id(mesh))))
         kwargs.setdefault('clim', mesh.get_data_range(kwargs.get('scalars', None)))
 
@@ -297,10 +295,10 @@ class WidgetHelper(object):
 
 
         def callback(normal, origin):
-            self.plane_sliced_mesh = pyvista.DataSetFilters.slice(mesh,
-                        normal=normal, origin=origin, contour=contour,
-                        generate_triangles=generate_triangles)
-            self.add_mesh(self.plane_sliced_mesh, name=name, **kwargs)
+            self.plane_sliced_mesh = mesh.slice(normal=normal, origin=origin,
+                        contour=contour, generate_triangles=generate_triangles)
+            self.add_mesh(self.plane_sliced_mesh, name=name, reset_camera=False,
+                          **kwargs)
 
         self.enable_plane_widget(callback=callback, bounds=mesh.bounds,
                                  factor=1.25, normal=normal, color=widget_color)
@@ -514,7 +512,7 @@ class WidgetHelper(object):
                 self.remove_actor(name)
             else:
                 self.add_mesh(self.threshold_mesh, name=name, scalars=scalars,
-                              **kwargs)
+                              reset_camera=False, **kwargs)
 
         self.enable_slider_widget(callback=callback, rng=rng, title=title,
                                   color=widget_color, pointa=pointa,

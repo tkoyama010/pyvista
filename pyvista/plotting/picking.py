@@ -17,10 +17,12 @@ class PickingHelper(object):
                             show=True, show_message=True, style='wireframe',
                             line_width=5, color='pink', font_size=18, **kwargs):
         """
-        Enables picking of cells.  Press r to enable retangle based
+        Enables picking of cells.  Press "r" to enable retangle based
         selection.  Press "r" again to turn it off.  Selection will be
-        saved to self.picked_cells.
-        Uses last input mesh for input
+        saved to ``self.picked_cells``. Also press "p" to pick a single cell
+        under the mouse location.
+
+        Uses last input mesh for input by default.
 
         Warning
         -------
@@ -31,7 +33,7 @@ class PickingHelper(object):
 
         Parameters
         ----------
-        mesh : vtk.UnstructuredGrid, optional
+        mesh : pyvista.Common, optional
             UnstructuredGrid grid to select cells from.  Uses last
             input grid by default.
 
@@ -70,7 +72,7 @@ class PickingHelper(object):
                 try:
                     self.add_mesh(self.picked_cells, name='_cell_picking_selection',
                         style=style, color=color, line_width=line_width,
-                        pickable=False, **kwargs)
+                        pickable=False, reset_camera=False, **kwargs)
                 except RuntimeError:
                     pass
 
@@ -136,6 +138,8 @@ class PickingHelper(object):
         if show_message:
             if show_message == True:
                 show_message = "Press R to toggle selection tool"
+                if not through:
+                    show_message += "\nPress P to pick a single cell under the mouse"
             self.add_text(str(show_message), font_size=font_size, name='_cell_picking_message')
         return
 
@@ -162,7 +166,7 @@ class PickingHelper(object):
             if show_point:
                 self.add_mesh(self.picked_point, color=color,
                               point_size=point_size, name='_picked_point',
-                              pickable=False, **kwargs)
+                              pickable=False, reset_camera=False, **kwargs)
             if hasattr(callback, '__call__'):
                 if use_mesh:
                     callback(self.picked_mesh, self.picked_point_id)
@@ -178,7 +182,7 @@ class PickingHelper(object):
         # Now add text about cell-selection
         if show_message:
             if show_message == True:
-                show_message = "Press P to pick over the mouse"
+                show_message = "Press P to pick under the mouse"
             self.add_text(str(show_message), font_size=font_size, name='_point_picking_message')
         return
 
@@ -215,7 +219,7 @@ class PickingHelper(object):
             if show_path:
                 self.add_mesh(self.picked_path, color=color, name='_picked_path',
                               line_width=line_width, point_size=point_size,
-                              **kwargs)
+                              reset_camera=False, **kwargs)
             if hasattr(callback, '__call__'):
                 callback(self.picked_path)
             return
@@ -228,7 +232,7 @@ class PickingHelper(object):
 
         self.add_key_event('c', _clear_path_event_watcher)
         if show_message == True:
-            show_message = "Press P to pick over the mouse\nPress C to clear"
+            show_message = "Press P to pick under the mouse\nPress C to clear"
 
         return self.enable_point_picking(callback=_the_callback, use_mesh=True,
                 font_size=font_size, show_message=show_message, show_point=False)
@@ -267,7 +271,7 @@ class PickingHelper(object):
 
             self.add_mesh(self.picked_geodesic, color=color, name='_picked_path',
                           line_width=line_width, point_size=point_size,
-                          **kwargs)
+                          reset_camera=False, **kwargs)
             if hasattr(callback, '__call__'):
                 callback(self.picked_geodesic)
             return
@@ -280,7 +284,7 @@ class PickingHelper(object):
 
         self.add_key_event('c', _clear_g_path_event_watcher)
         if show_message == True:
-            show_message = "Press P to pick over the mouse\nPress C to clear"
+            show_message = "Press P to pick under the mouse\nPress C to clear"
 
         return self.enable_point_picking(callback=_the_callback, use_mesh=True,
                 font_size=font_size, show_message=show_message, show_point=False)
@@ -295,18 +299,18 @@ class PickingHelper(object):
         """Helper for the ``enable_path_picking`` method to also show a ribbon
         surface along the picked path.
         """
-
-        self.add_key_event('c', lambda: self.remove_actor('_horizon'))
+        name = '_horizon'
+        self.add_key_event('c', lambda: self.remove_actor(name))
 
         def _the_callback(path):
             if path.n_points < 2:
-                self.remove_actor('_horizon')
+                self.remove_actor(name)
                 return
             self.picked_horizon = path.ribbon(normal=normal, width=width)
 
             if show_horizon:
-                self.add_mesh(self.picked_horizon, name='_horizon', color=color,
-                       opacity=opacity, pickable=False)
+                self.add_mesh(self.picked_horizon, name=name, color=color,
+                       opacity=opacity, pickable=False, reset_camera=False)
 
             if hasattr(callback, '__call__'):
                 callback(path)

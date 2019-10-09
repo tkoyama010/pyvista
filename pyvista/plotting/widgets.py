@@ -4,6 +4,7 @@ import vtk
 import pyvista
 from pyvista.utilities import NORMALS, generate_plane, get_array, try_callback
 
+from .colors import color_char_to_word
 from .theme import rcParams, parse_color
 
 
@@ -777,7 +778,7 @@ class WidgetHelper(object):
         return
 
 
-    def enable_button_widget(self, callback, state=0, n_states=2,
+    def enable_button_widget(self, callback, n_states=2,
                              color=None, **kwargs):
         """Add a boolean button widget to the scene.
         """
@@ -789,25 +790,45 @@ class WidgetHelper(object):
         if not hasattr(self, "button_widgets"):
             self.button_widgets = []
 
-        if color is None:
-            color = rcParams['font']['color']
+        if isinstance(color, (list, tuple, np.ndarray)):
+            colors = color
+        else:
+            colors = list(color_char_to_word.keys())[0:n_states]
 
-        button_rep = vtk.vtkProp3DButtonRepresentation()
+        def create_texture(color):
+            color = pyvista.parse_color(color)
+            image = pyvista.UniformGrid()
+            image.dimensions = (10, 10, 1)
+            image.point_arrays["colors"] = np.full((image.n_points, 3), color)
+            return image
+
+        button_rep = vtk.vtkTexturedButtonRepresentation2D()
         button_rep.SetPickable(False)
         button_rep.SetNumberOfStates(n_states)
-        button_rep.SetState(state)
-        button_rep.PlaceWidget(self.bounds)
+        button_rep.SetState(0)
 
-        # this->Actor->GetProperty()->SetColor(reinterpret_cast<vtkActor *>(rep->GetButtonProp(state))->GetProperty()->GetColor());
-
-        button_source = vtk.vtkRectangularButtonSource()
-
+        for i in range(n_states):
+            print(colors[i])
+            button_rep.SetButtonTexture(i, create_texture(colors[i]))
 
         def _the_callback(button, event):
             value = button.GetRepresentation().GetState()
+            print(value)
             if hasattr(callback, '__call__'):
                 try_callback(callback, value)
             return
+
+        upper_right = vtk.vtkCoordinate()
+        upper_right.SetCoordinateSystemToNormalizedDisplay()
+        upper_right.SetValue(1.0, 1.0)
+        sz = 50.0
+        bds = [0, 1, 0, 1, 0, 0]
+        bds[0] = upper_right.GetComputedDisplayValue(self.renderer)[0] - sz
+        bds[1] = bds[0] + sz
+        bds[2] = upper_right.GetComputedDisplayValue(self.renderer)[1] - sz
+        bds[3] = bds[2] + sz
+        button_rep.SetPlaceFactor(1)
+        button_rep.PlaceWidget(bds)
 
         button_widget = vtk.vtkButtonWidget()
         button_widget.SetInteractor(self.iren)
@@ -815,7 +836,7 @@ class WidgetHelper(object):
         button_widget.SetRepresentation(button_rep)
         button_widget.On()
         button_widget.AddObserver(vtk.vtkCommand.EndInteractionEvent, _the_callback)
-        _the_callback(button_widget, None)
+        # _the_callback(button_widget, None)
 
         self.button_widgets.append(button_widget)
         return button_widget
@@ -830,43 +851,44 @@ class WidgetHelper(object):
 
 
 
-    def enable_hover_widget(self, callback, duration=2000):
-        """Only one hover widget allowed. This will call the callback when the
-        mouse has been hovering over the scene for ``duration`` milliseconds.
-        """
-        if hasattr(self, 'notebook') and self.notebook:
-            raise AssertionError('Hover widget not available in notebook plotting')
-        if not hasattr(self, 'iren'):
-            raise AttributeError('Widgets must be used with an intereactive renderer. No off screen plotting.')
-        if hasattr(self, "hover_widget"):
-            del self.hover_widget
-
-        self.hover_widget = vtk.vtkHoverWidget()
-        self.hover_widget.SetInteractor(self.iren)
-        self.hover_widget.SetCurrentRenderer(self.renderer)
-        self.hover_widget.SetTimerDuration(duration)
-        self.hover_widget.On()
-
-        def _the_callback(widget, event):
-            if hasattr(callback, '__call__'):
-                try_callback(callback)
-            return
-
-        self.hover_widget.AddObserver(vtk.vtkCommand.TimerEvent, _the_callback)
-        self.hover_widget.AddObserver(vtk.vtkCommand.EndInteractionEvent, _the_callback)
-
-        return self.hover_widget
-
-
-    def disable_hover_widget(self):
-        if hasattr(self, "hover_widget"):
-            self.hover_widget.Off()
-
-
-    def reenable_hover_widget(self):
-        """Re-enable a hover widget and its callback if one exists"""
-        if hasattr(self, "hover_widget"):
-            self.hover_widget.On()
+    # # TODO: NOT SURE HOW TO USE THIS YET
+    # def enable_hover_widget(self, callback, duration=2000):
+    #     """Only one hover widget allowed. This will call the callback when the
+    #     mouse has been hovering over the scene for ``duration`` milliseconds.
+    #     """
+    #     if hasattr(self, 'notebook') and self.notebook:
+    #         raise AssertionError('Hover widget not available in notebook plotting')
+    #     if not hasattr(self, 'iren'):
+    #         raise AttributeError('Widgets must be used with an intereactive renderer. No off screen plotting.')
+    #     if hasattr(self, "hover_widget"):
+    #         del self.hover_widget
+    #
+    #     self.hover_widget = vtk.vtkHoverWidget()
+    #     self.hover_widget.SetInteractor(self.iren)
+    #     self.hover_widget.SetCurrentRenderer(self.renderer)
+    #     self.hover_widget.SetTimerDuration(duration)
+    #     self.hover_widget.On()
+    #
+    #     def _the_callback(widget, event):
+    #         if hasattr(callback, '__call__'):
+    #             try_callback(callback)
+    #         return
+    #
+    #     self.hover_widget.AddObserver(vtk.vtkCommand.TimerEvent, _the_callback)
+    #     self.hover_widget.AddObserver(vtk.vtkCommand.EndInteractionEvent, _the_callback)
+    #
+    #     return self.hover_widget
+    #
+    #
+    # def disable_hover_widget(self):
+    #     if hasattr(self, "hover_widget"):
+    #         self.hover_widget.Off()
+    #
+    #
+    # def reenable_hover_widget(self):
+    #     """Re-enable a hover widget and its callback if one exists"""
+    #     if hasattr(self, "hover_widget"):
+    #         self.hover_widget.On()
 
 
     def close(self):
@@ -889,5 +911,5 @@ class WidgetHelper(object):
         if hasattr(self, 'button_widgets'):
             del self.button_widgets
 
-        if hasattr(self, 'hover_widget'):
-            del self.hover_widget
+        # if hasattr(self, 'hover_widget'):
+        #     del self.hover_widget

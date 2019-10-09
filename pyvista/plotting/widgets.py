@@ -403,7 +403,7 @@ class WidgetHelper(object):
 
 
     def add_mesh_slice_orthogonal(self, mesh, generate_triangles=False,
-                                  widget_color=None, tubing=False,**kwargs):
+                                  widget_color=None, tubing=False, **kwargs):
         """Adds three interactive plane slicing widgets for orthogonal slicing
         along each cartesian axis.
         """
@@ -777,6 +777,98 @@ class WidgetHelper(object):
         return
 
 
+    def enable_button_widget(self, callback, state=0, n_states=2,
+                             color=None, **kwargs):
+        """Add a boolean button widget to the scene.
+        """
+        if hasattr(self, 'notebook') and self.notebook:
+            raise AssertionError('Button widget not available in notebook plotting')
+        if not hasattr(self, 'iren'):
+            raise AttributeError('Widgets must be used with an intereactive renderer. No off screen plotting.')
+
+        if not hasattr(self, "button_widgets"):
+            self.button_widgets = []
+
+        if color is None:
+            color = rcParams['font']['color']
+
+        button_rep = vtk.vtkProp3DButtonRepresentation()
+        button_rep.SetPickable(False)
+        button_rep.SetNumberOfStates(n_states)
+        button_rep.SetState(state)
+        button_rep.PlaceWidget(self.bounds)
+
+        # this->Actor->GetProperty()->SetColor(reinterpret_cast<vtkActor *>(rep->GetButtonProp(state))->GetProperty()->GetColor());
+
+        button_source = vtk.vtkRectangularButtonSource()
+
+
+        def _the_callback(button, event):
+            value = button.GetRepresentation().GetState()
+            if hasattr(callback, '__call__'):
+                try_callback(callback, value)
+            return
+
+        button_widget = vtk.vtkButtonWidget()
+        button_widget.SetInteractor(self.iren)
+        button_widget.SetCurrentRenderer(self.renderer)
+        button_widget.SetRepresentation(button_rep)
+        button_widget.On()
+        button_widget.AddObserver(vtk.vtkCommand.EndInteractionEvent, _the_callback)
+        _the_callback(button_widget, None)
+
+        self.button_widgets.append(button_widget)
+        return button_widget
+
+
+    def disable_button_widgets(self):
+        """ Disable all of the sphere widgets """
+        if hasattr(self, 'button_widgets'):
+            for widget in self.button_widgets:
+                widget.Off()
+        return
+
+
+
+    def enable_hover_widget(self, callback, duration=2000):
+        """Only one hover widget allowed. This will call the callback when the
+        mouse has been hovering over the scene for ``duration`` milliseconds.
+        """
+        if hasattr(self, 'notebook') and self.notebook:
+            raise AssertionError('Hover widget not available in notebook plotting')
+        if not hasattr(self, 'iren'):
+            raise AttributeError('Widgets must be used with an intereactive renderer. No off screen plotting.')
+        if hasattr(self, "hover_widget"):
+            del self.hover_widget
+
+        self.hover_widget = vtk.vtkHoverWidget()
+        self.hover_widget.SetInteractor(self.iren)
+        self.hover_widget.SetCurrentRenderer(self.renderer)
+        self.hover_widget.SetTimerDuration(duration)
+        self.hover_widget.On()
+
+        def _the_callback(widget, event):
+            if hasattr(callback, '__call__'):
+                try_callback(callback)
+            return
+
+        self.hover_widget.AddObserver(vtk.vtkCommand.TimerEvent, _the_callback)
+        self.hover_widget.AddObserver(vtk.vtkCommand.EndInteractionEvent, _the_callback)
+
+        return self.hover_widget
+
+
+    def disable_hover_widget(self):
+        if hasattr(self, "hover_widget"):
+            self.hover_widget.Off()
+
+
+    def reenable_hover_widget(self):
+        """Re-enable a hover widget and its callback if one exists"""
+        if hasattr(self, "hover_widget"):
+            self.hover_widget.On()
+
+
     def close(self):
         """ closes widgets """
         if hasattr(self, 'box_widgets'):
@@ -793,3 +885,9 @@ class WidgetHelper(object):
 
         if hasattr(self, 'sphere_widgets'):
             del self.sphere_widgets
+
+        if hasattr(self, 'button_widgets'):
+            del self.button_widgets
+
+        if hasattr(self, 'hover_widget'):
+            del self.hover_widget

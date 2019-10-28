@@ -1087,44 +1087,44 @@ class WidgetHelper(object):
 
 
 
-    # # TODO: NOT SURE HOW TO USE THIS YET
-    # def enable_hover_widget(self, callback, duration=2000):
-    #     """Only one hover widget allowed. This will call the callback when the
-    #     mouse has been hovering over the scene for ``duration`` milliseconds.
-    #     """
-    #     if hasattr(self, 'notebook') and self.notebook:
-    #         raise AssertionError('Hover widget not available in notebook plotting')
-    #     if not hasattr(self, 'iren'):
-    #         raise AttributeError('Widgets must be used with an intereactive renderer. No off screen plotting.')
-    #     if hasattr(self, "hover_widget"):
-    #         del self.hover_widget
-    #
-    #     self.hover_widget = vtk.vtkHoverWidget()
-    #     self.hover_widget.SetInteractor(self.iren)
-    #     self.hover_widget.SetCurrentRenderer(self.renderer)
-    #     self.hover_widget.SetTimerDuration(duration)
-    #     self.hover_widget.On()
-    #
-    #     def _the_callback(widget, event):
-    #         if hasattr(callback, '__call__'):
-    #             try_callback(callback)
-    #         return
-    #
-    #     self.hover_widget.AddObserver(vtk.vtkCommand.TimerEvent, _the_callback)
-    #     self.hover_widget.AddObserver(vtk.vtkCommand.EndInteractionEvent, _the_callback)
-    #
-    #     return self.hover_widget
-    #
-    #
-    # def disable_hover_widget(self):
-    #     if hasattr(self, "hover_widget"):
-    #         self.hover_widget.Off()
-    #
-    #
-    # def reenable_hover_widget(self):
-    #     """Re-enable a hover widget and its callback if one exists"""
-    #     if hasattr(self, "hover_widget"):
-    #         self.hover_widget.On()
+    # TODO: NOT SURE HOW TO USE THIS YET
+    def enable_hover_widget(self, callback, duration=2000):
+        """Only one hover widget allowed. This will call the callback when the
+        mouse has been hovering over the scene for ``duration`` milliseconds.
+        """
+        if hasattr(self, 'notebook') and self.notebook:
+            raise AssertionError('Hover widget not available in notebook plotting')
+        if not hasattr(self, 'iren'):
+            raise AttributeError('Widgets must be used with an intereactive renderer. No off screen plotting.')
+        if hasattr(self, "hover_widget"):
+            del self.hover_widget
+
+        self.hover_widget = vtk.vtkHoverWidget()
+        self.hover_widget.SetInteractor(self.iren)
+        self.hover_widget.SetCurrentRenderer(self.renderer)
+        self.hover_widget.SetTimerDuration(duration)
+        self.hover_widget.On()
+
+        def _the_callback(widget, event):
+            self.add_text(str(event), name='foo')
+            if hasattr(callback, '__call__'):
+                try_callback(callback)
+            return
+
+        self.hover_widget.AddObserver(vtk.vtkCommand.TimerEvent, _the_callback)
+
+        return self.hover_widget
+
+
+    def disable_hover_widget(self):
+        if hasattr(self, "hover_widget"):
+            self.hover_widget.Off()
+
+
+    def reenable_hover_widget(self):
+        """Re-enable a hover widget and its callback if one exists"""
+        if hasattr(self, "hover_widget"):
+            self.hover_widget.On()
 
 
     def close(self):
@@ -1136,3 +1136,4 @@ class WidgetHelper(object):
         self.clear_sphere_widgets()
         self.clear_spline_widgets()
         self.clear_button_widgets()
+        del self.hover_widget

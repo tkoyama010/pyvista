@@ -70,9 +70,9 @@ try:
     from PySide2 import QtGui
     from PySide2 import QtCore
     from PySide2.QtWidgets import (QMenuBar, QVBoxLayout, QHBoxLayout, QDoubleSpinBox,
-                                 QFrame, QMainWindow, QSlider,
-                                 QSpinBox, QHBoxLayout, QDialog,
-                                 QFormLayout, QGroupBox, QFileDialog)
+                                   QFrame, QMainWindow, QSlider, QAction,
+                                   QSpinBox, QHBoxLayout, QDialog,
+                                   QFormLayout, QGroupBox, QFileDialog)
     has_pyqt = True
 except ImportError:  # pragma: no cover
     pass

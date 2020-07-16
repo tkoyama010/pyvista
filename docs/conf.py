@@ -6,8 +6,6 @@ if sys.version_info >= (3, 0):
     faulthandler.enable()
 
 sys.path.insert(0, os.path.abspath('.'))
-import make_external_gallery
-make_external_gallery.make_example_gallery()
 
 
 # -- pyvista configuration ---------------------------------------------------
@@ -24,9 +22,6 @@ pyvista.rcParams['window_size'] = np.array([1024, 768]) * 2
 pyvista.FIGURE_PATH = os.path.join(os.path.abspath('./images/'), 'auto-generated/')
 if not os.path.exists(pyvista.FIGURE_PATH):
     os.makedirs(pyvista.FIGURE_PATH)
-
-# necessary when building the sphinx gallery
-pyvista.BUILDING_GALLERY = True
 
 # SG warnins
 import warnings
@@ -50,7 +45,6 @@ extensions = ['sphinx.ext.autodoc',
               'sphinx.ext.autosummary',
               'notfound.extension',
               'sphinx_copybutton',
-              'sphinx_gallery.gen_gallery',
               'sphinx.ext.extlinks',
               'sphinx.ext.coverage',
               ]

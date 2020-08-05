@@ -3,9 +3,10 @@
 import logging
 import os
 import re
-import scooby
 import sys
 
+import numpy as np
+import scooby
 import vtk
 
 import pyvista
@@ -116,6 +117,8 @@ def get_gpu_info():
     plotter.show(auto_close=False)
     gpu_info = plotter.ren_win.ReportCapabilities()
     plotter.close()
+    # Remove from list of Plotters
+    pyvista.plotting._ALL_PLOTTERS.pop(plotter._id_name)
     return gpu_info
 
 
@@ -125,7 +128,6 @@ class GPUInfo():
     def __init__(self):
         """Instantiate a container for the GPU information."""
         self._gpu_info = get_gpu_info()
-
 
     @property
     def renderer(self):
@@ -137,7 +139,6 @@ class GPUInfo():
             raise RuntimeError("Unable to parse GPU information for the renderer.")
         return renderer.strip()
 
-
     @property
     def version(self):
         """GPU renderer version."""
@@ -147,7 +148,6 @@ class GPUInfo():
         except IndexError:
             raise RuntimeError("Unable to parse GPU information for the version.")
         return version.strip()
-
 
     @property
     def vendor(self):
@@ -159,14 +159,12 @@ class GPUInfo():
             raise RuntimeError("Unable to parse GPU information for the vendor.")
         return vendor.strip()
 
-
     def get_info(self):
         """All GPU information as tuple pairs."""
         return (("GPU Vendor", self.vendor),
                 ("GPU Renderer", self.renderer),
                 ("GPU Version", self.version),
                )
-
 
     def _repr_html_(self):
         """HTML table representation."""
@@ -177,7 +175,6 @@ class GPUInfo():
         fmt += "</table>"
         return fmt
 
-
     def __repr__(self):
         """Representation method."""
         content = "\n"
@@ -185,7 +182,6 @@ class GPUInfo():
             content += "{:>18}".format(k)+' : {}\n'.format(v)
         content += "\n"
         return content
-
 
 
 class Report(scooby.Report):
@@ -217,19 +213,22 @@ class Report(scooby.Report):
 
         """
         # Mandatory packages.
-        core = ['pyvista', 'vtk', 'numpy', 'imageio', 'appdirs', 'scooby']
+        core = ['pyvista', 'vtk', 'numpy', 'imageio', 'appdirs', 'scooby',
+                'meshio']
 
         # Optional packages.
-        optional = ['matplotlib', 'PyQt5', 'IPython', 'colorcet',
-                    'cmocean', 'panel']
+        optional = ['matplotlib', 'pyvistaqt', 'PyQt5', 'IPython', 'colorcet',
+                    'cmocean', 'panel', 'scipy', 'itkwidgets', 'tqdm']
 
-        # Information about the GPU - bare except incase there is a rendering
+        # Information about the GPU - bare except in case there is a rendering
         # bug that the user is trying to report.
         if gpu:
             try:
-                extra_meta = [(t[1], t[0]) for t in GPUInfo().get_info()]
+                extra_meta = GPUInfo().get_info()
             except:
                 extra_meta = ("GPU Details", "error")
+        else:
+            extra_meta = ("GPU Details", "None")
 
         scooby.Report.__init__(self, additional=additional, core=core,
                                optional=optional, ncol=ncol,
@@ -241,17 +240,24 @@ def assert_empty_kwargs(**kwargs):
     """Assert that all keyword arguments have been used (internal helper).
 
     If any keyword arguments are passed, a ``TypeError`` is raised.
-
     """
     n = len(kwargs)
     if n == 0:
         return True
     caller = sys._getframe(1).f_code.co_name
     keys = list(kwargs.keys())
-    bad_arguments = "[" + ("{}, " * (n - 1) + "{}").format(*keys) + "]"
+    bad_arguments = ', '.join(['"%s"' % key for key in keys])
     if n == 1:
         grammar = "is an invalid keyword argument"
     else:
         grammar = "are invalid keyword arguments"
     message = "{} {} for `{}`".format(bad_arguments, grammar, caller)
     raise TypeError(message)
+
+
+def check_valid_vector(point, name=''):
+    """Check if a vector contains three components."""
+    if np.array(point).size != 3:
+        if name == '':
+            name = 'Vector'
+        raise TypeError('%s must be a length three tuple of floats.' % name)

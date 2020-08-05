@@ -3,10 +3,14 @@
 Installation
 ============
 
-PyVista is supported on Python versions 3.5+, with temporary support for
-Python 2.7 as outlined in `this issue`_.
+PyVista is supported on Python versions 3.5+. Previous versions of Python are
+no longer supported as outlined in `this issue`_.
 
 .. _this issue: https://github.com/pyvista/pyvista/issues/164
+
+For the best experience, please considering using Anaconda as a virtual
+environment and package manager for Python and following the instructions to
+install PyVista with Anaconda.
 
 Dependencies
 ~~~~~~~~~~~~
@@ -19,6 +23,8 @@ the following projects are required dependencies of PyVista:
 * `imageio <https://pypi.org/project/imageio/>`_ - This library is used for saving screenshots.
 * `appdirs <https://pypi.org/project/appdirs/>`_ - Data management for our example datasets so users can download tutorials on the fly.
 * `meshio <https://pypi.org/project/meshio/>`_ - Input/Output for many mesh formats.
+* `scooby <https://github.com/banesullivan/scooby>`_ - Debugging tools
+* `PyVirtualDisplay <https://pypi.org/project/PyVirtualDisplay/>`_ - python wrapper for Xvfb, Xephyr and Xvnc
 
 PyPI
 ~~~~
@@ -38,7 +44,7 @@ Anaconda
 .. image:: https://img.shields.io/conda/vn/conda-forge/pyvista.svg?logo=conda-forge&logoColor=white
    :target: https://anaconda.org/conda-forge/pyvista
 
-To install this package with conda run::
+To install this package with ``conda`` run::
 
     conda install -c conda-forge pyvista
 
@@ -53,7 +59,7 @@ The following are a list of optional dependencies and their purpose:
 +===================================+=========================================+
 | ``matplotlib``                    | Using Colormaps                         |
 +-----------------------------------+-----------------------------------------+
-| ``PyQt5==5.11.3``                 | Background plotting                     |
+| ``itkwidgets``                    | Interactive notebook rendering          |
 +-----------------------------------+-----------------------------------------+
 | ``panel``                         | Interactive notebook rendering          |
 +-----------------------------------+-----------------------------------------+
@@ -63,18 +69,28 @@ The following are a list of optional dependencies and their purpose:
 +-----------------------------------+-----------------------------------------+
 | ``cmocean``                       | Oceanographic colormaps                 |
 +-----------------------------------+-----------------------------------------+
+| ``imageio-ffmpeg``                | Saving movie files                      |
++-----------------------------------+-----------------------------------------+
+| ``tqdm``                          | Status bars for monitoring filters      |
++-----------------------------------+-----------------------------------------+
+| ``pyvirtualdisplay``              | Headless display management             |
++-----------------------------------+-----------------------------------------+
 
 
 Source / Developers
 ~~~~~~~~~~~~~~~~~~~
 
 Alternatively, you can install the latest version from GitHub by visiting
-`PyVista <https://github.com/pyvista/pyvista>`_, downloading the source
-(or cloning), and running::
+`PyVista <https://github.com/pyvista/pyvista>`_, and downloading the source
+(cloning) by running::
 
     git clone https://github.com/pyvista/pyvista.git
     cd pyvista
     python -m pip install -e .
+
+
+The latest documentation for the ``master`` branch of PyVista can be found at
+`dev.pyvista.org <https://dev.pyvista.org>`_.
 
 
 Test Installation
@@ -120,7 +136,7 @@ services like Travis and Azure Pipelines to run PyVista.
 Running on MyBinder
 ~~~~~~~~~~~~~~~~~~~
 
-This section is for advanced users that would like to install and use PyVista
+This section is for users that would like to install and use PyVista
 with headless displays on notebook hosting services like MyBinder_.
 
 Please see `this project`_ for a convenient Cookiecutter_ to get started using
@@ -137,9 +153,27 @@ a file called ``apt.txt``::
     libgl1-mesa-dev
     xvfb
 
-Then, you need to configure the headless display, for MyBinder, create a file
-called ``start`` and include the following set up script that will run every
-time your Docker container is launched:
+You will also need to install `PyVirtualDisplay <https://pypi.org/project/PyVirtualDisplay/>`_ - python wrapper for Xvfb, Xephyr and Xvnc::
+
+    pip install pyvirtualdisplay
+
+Then, you need to configure two environment variables to let PyVista know to
+launch the headless display when plotting: ``PYVISTA_VIRTUAL_DISPLAY`` and
+``PYVISTA_OFF_SCREEN``. For MyBinder, create a file called ``start`` and
+include the following set up script that will run every time your Docker
+container is launched:
+
+.. code-block:: bash
+
+    #!/bin/bash
+    set -x
+    export PYVISTA_VIRTUAL_DISPLAY=true
+    export PYVISTA_OFF_SCREEN=true
+    export PYVISTA_USE_PANEL=true
+    set +x
+    exec "$@"
+
+If you want to use pyvista with `Paraview <https://www.paraview.org/>`_ , you should set Xvfb instead of using ``PYVISTA_VIRTUAL_DISPLAY``.
 
 .. code-block:: bash
 
@@ -154,13 +188,9 @@ time your Docker container is launched:
     set +x
     exec "$@"
 
-
-And that's it! Include PyVista in your Python requirements and get to
-visualizing your data! If you need more help than this on setting up PyVista
-for these types of services, hop on Slack and chat with the developers or take
-a look at `this repository`_ that is currently using PyVista on MyBinder.
-
-.. _this repository: https://github.com/OpenGeoVis/PVGeo-Examples
+And that's it! Include PyVista and pyvirtualdisplay in your Python requirements
+and get to visualizing your data! If you need more help than this on setting up
+PyVista for these types of services, hop on Slack and chat with the developers.
 
 
 Running on Remote Servers
@@ -181,7 +211,7 @@ After logging into the remote server, install Miniconda and related packages:
     conda create --name vtk_env python=3.7
     conda activate vtk_env
     conda install nodejs  # required when importing pyvista in Jupyter
-    pip install jupyter pyvista panel
+    pip install jupyter pyvista panel pyvirtualdisplay
 
     # To avoid "ModuleNotFoundError: No module named 'vtkOpenGLKitPython' " when importing vtk
     # https://stackoverflow.com/q/32389599
@@ -193,11 +223,9 @@ Then, configure the headless display:
 .. code-block:: bash
 
     sudo apt-get install xvfb
-    export DISPLAY=:99.0
+    export PYVISTA_VIRTUAL_DISPLAY=true
     export PYVISTA_OFF_SCREEN=true
     export PYVISTA_USE_PANEL=true
-    Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 &
-    sleep 3
 
 Reconnect to the server with port-forwarding, and start Jupyter:
 
@@ -208,3 +236,30 @@ Reconnect to the server with port-forwarding, and start Jupyter:
     jupyter notebook --NotebookApp.token='' --no-browser --port=8888
 
 Visit ``localhost:8888`` in the web browser.
+
+
+Running with Sphinx-Gallery
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In your ``conf.py``, add the following:
+
+
+.. code-block:: python
+
+    import pyvista
+    # necessary when building the sphinx gallery
+    pyvista.BUILDING_GALLERY = True
+    pyvista.OFF_SCREEN = True
+
+    # Optional - set parameters like theme or window size
+    pyvista.set_plot_theme('document')
+    pyvista.rcParams['window_size'] = np.array([1024, 768]) * 2
+
+    ...
+
+    # Add the PyVista image scraper to SG
+    sphinx_gallery_conf = {
+        ...
+        "image_scrapers": ('pyvista', ..., ),
+        ...
+    }

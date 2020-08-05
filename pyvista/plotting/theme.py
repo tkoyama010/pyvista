@@ -1,16 +1,15 @@
 """Module managing different plotting theme parameters."""
 
 import os
+
 import vtk
 
 from .colors import string_to_rgb, PARAVIEW_BACKGROUND
-
 
 MAX_N_COLOR_BARS = 10
 FONT_KEYS = {'arial': vtk.VTK_ARIAL,
              'courier': vtk.VTK_COURIER,
              'times': vtk.VTK_TIMES}
-
 
 rcParams = {
     'auto_close': True, # DANGER: set to False with extreme caution
@@ -33,6 +32,7 @@ rcParams = {
     'nan_color': 'darkgray',
     'edge_color': 'black',
     'outline_color': 'white',
+    'floor_color': 'gray',
     'colorbar_orientation': 'horizontal',
     'colorbar_horizontal': {
         'width': 0.6,
@@ -59,13 +59,39 @@ rcParams = {
         'y_color': 'seagreen',
         'z_color': 'mediumblue',
         'box': False,
+        'show': True,
     },
     'multi_samples': 4,
     'multi_rendering_splitting_position': None,
-    "volume_mapper": "fixed_point" if os.name == 'nt' else "smart",
+    'volume_mapper': 'fixed_point' if os.name == 'nt' else 'smart',
+    'depth_peeling': {
+        'number_of_peels': 4,
+        'occlusion_ratio': 0.0,
+        'enabled': False,
+    },
+    'slider_style': {
+        'classic': {
+            'slider_length': 0.02,
+            'slider_width': 0.04,
+            'slider_color': (0.5, 0.5, 0.5),
+            'tube_width': 0.005,
+            'tube_color': (1, 1, 1),
+            'cap_opacity': 1,
+            'cap_length': 0.01,
+            'cap_width': 0.02,
+        },
+        'modern': {
+            'slider_length': 0.02,
+            'slider_width': 0.04,
+            'slider_color': (0.43137255, 0.44313725, 0.45882353),
+            'tube_width': 0.04,
+            'tube_color': (0.69803922, 0.70196078, 0.70980392),
+            'cap_opacity': 0,
+            'cap_length': 0.01,
+            'cap_width': 0.02,
+        },
+    },
 }
-
-
 
 DEFAULT_THEME = dict(rcParams)
 
@@ -114,7 +140,6 @@ def set_plot_theme(theme):
             rcParams[k] = v
 
 
-
 def parse_color(color, opacity=None):
     """Parse color into a vtk friendly rgb list.
 
@@ -130,7 +155,7 @@ def parse_color(color, opacity=None):
     elif len(color) == 4:
         color = color[:3]
     else:
-        raise Exception("""
+        raise ValueError("""
     Invalid color input: ({})
     Must be string, rgb list, or hex color string.  For example:
         color='white'
@@ -142,13 +167,12 @@ def parse_color(color, opacity=None):
     return color
 
 
-
 def parse_font_family(font_family):
     """Check font name."""
     # check font name
     font_family = font_family.lower()
     if font_family not in ['courier', 'times', 'arial']:
-        raise Exception('Font must be either "courier", "times" '
-                        'or "arial"')
+        raise ValueError('Font must be either "courier", "times" '
+                         'or "arial"')
 
     return FONT_KEYS[font_family]

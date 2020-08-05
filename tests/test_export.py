@@ -3,7 +3,6 @@ import sys
 
 import numpy as np
 import pytest
-import vtk
 
 import pyvista
 from pyvista import examples as ex
@@ -13,6 +12,7 @@ if __name__ != '__main__':
     OFF_SCREEN = 'pytest' in sys.modules
 else:
     OFF_SCREEN = False
+
 
 @pytest.mark.skipif(not system_supports_plotting(), reason="Requires system to support plotting")
 def test_export_single(tmpdir):
@@ -74,6 +74,7 @@ def test_export_verts(tmpdir):
     plotter.close()
     # Now make sure the file is there
     assert os.path.isfile('{}.vtkjs'.format(filename))
+
 
 @pytest.mark.skipif(not system_supports_plotting(), reason="Requires system to support plotting")
 def test_export_color(tmpdir):

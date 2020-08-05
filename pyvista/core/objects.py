@@ -8,20 +8,15 @@ import numpy as np
 import vtk
 
 import pyvista
-from pyvista.utilities import (ROW_DATA_FIELD, assert_empty_kwargs,
-                               convert_array, get_array, parse_field_choice,
-                               row_array, vtk_bit_array_to_char)
-
-from .common import DataObject, _ScalarsDict
+from pyvista.utilities import (FieldAssociation, assert_empty_kwargs, get_array,
+                               row_array)
+from .common import DataObject
+from .datasetattributes import DataSetAttributes
 
 try:
     import pandas as pd
 except ImportError:
     pd = None
-
-
-
-
 
 
 class Table(vtk.vtkTable, DataObject):
@@ -41,6 +36,7 @@ class Table(vtk.vtkTable, DataObject):
 
     def __init__(self, *args, **kwargs):
         """Initialize the table."""
+        super().__init__(*args, **kwargs)
         if len(args) == 1:
             if isinstance(args[0], vtk.vtkTable):
                 deep = kwargs.get('deep', True)
@@ -57,51 +53,40 @@ class Table(vtk.vtkTable, DataObject):
             else:
                 raise TypeError('Table unable to be made from ({})'.format(type(args[0])))
 
-
-        self._row_bool_array_names = []
-
-
     def _from_arrays(self, arrays):
         if not arrays.ndim == 2:
-            raise AssertionError('Only 2D arrays are supported by Tables.')
+            raise ValueError('Only 2D arrays are supported by Tables.')
         np_table = arrays.T
         for i, array in enumerate(np_table):
             self.row_arrays['Array {}'.format(i)] = array
         return
 
-
     def _from_dict(self, array_dict):
         for array in array_dict.values():
-            if not isinstance(array, (np.ndarray)) and array.ndim < 3:
-                raise RuntimeError('Dictionaty must contain only NumPy arrays with maximum of 2D.')
+            if not isinstance(array, np.ndarray) and array.ndim < 3:
+                raise ValueError('Dictionary must contain only NumPy arrays with maximum of 2D.')
         for name, array in array_dict.items():
             self.row_arrays[name] = array
         return
 
-
     def _from_pandas(self, data_frame):
         for name in data_frame.keys():
-            self.row_arrays[name] = data_frame[name]
-        return
-
+            self.row_arrays[name] = data_frame[name].values
 
     @property
     def n_rows(self):
         """Return the number of rows."""
         return self.GetNumberOfRows()
 
-
     @n_rows.setter
     def n_rows(self, n):
         """Set the number of rows."""
         self.SetNumberOfRows(n)
 
-
     @property
     def n_columns(self):
         """Return the number of columns."""
         return self.GetNumberOfColumns()
-
 
     @property
     def n_arrays(self):
@@ -111,7 +96,6 @@ class Table(vtk.vtkTable, DataObject):
 
         """
         return self.n_columns
-
 
     def _row_array(self, name=None):
         """Return row scalars of a vtk object.
@@ -127,78 +111,32 @@ class Table(vtk.vtkTable, DataObject):
             Numpy array of scalars
 
         """
-        if name is None:
-            # use first array
-            name = self.GetRowData().GetArrayName(0)
-            if name is None:
-                raise RuntimeError('No arrays present to fetch.')
-        vtkarr = self.GetRowData().GetAbstractArray(name)
-        if vtkarr is None:
-            raise AssertionError('({}) is not a row scalar'.format(name))
-
-        # numpy does not support bit array data types
-        if isinstance(vtkarr, vtk.vtkBitArray):
-            vtkarr = vtk_bit_array_to_char(vtkarr)
-            if name not in self._row_bool_array_names:
-                self._row_bool_array_names.append(name)
-
-        array = convert_array(vtkarr)
-        if array.dtype == np.uint8 and name in self._row_bool_array_names:
-            array = array.view(np.bool)
-        return array
-
+        return self.row_arrays[name]
 
     @property
     def row_arrays(self):
         """Return the all row arrays."""
-        pdata = self.GetRowData()
-        narr = pdata.GetNumberOfArrays()
-
-        # Update data if necessary
-        if hasattr(self, '_row_arrays'):
-            keys = list(self._row_arrays.keys())
-            if narr == len(keys):
-                if keys:
-                    if self._row_arrays[keys[0]].shape[0] == self.n_rows:
-                        return self._row_arrays
-                else:
-                    return self._row_arrays
-
-        # dictionary with callbacks
-        self._row_arrays = RowScalarsDict(self)
-
-        for i in range(narr):
-            name = pdata.GetArrayName(i)
-            self._row_arrays[name] = self._row_array(name)
-
-        self._row_arrays.enable_callback()
-        return self._row_arrays
-
+        return DataSetAttributes(vtkobject=self.GetRowData(), dataset=self, association=FieldAssociation.ROW)
 
     def keys(self):
         """Return the table keys."""
-        return list(self.row_arrays.keys())
-
+        return self.row_arrays.keys()
 
     def items(self):
         """Return the table items."""
         return self.row_arrays.items()
 
-
     def values(self):
         """Return the table values."""
         return self.row_arrays.values()
-
 
     def update(self, data):
         """Set the table data."""
         self.row_arrays.update(data)
 
-
     def pop(self, name):
         """Pops off an array by the specified name."""
         return self.row_arrays.pop(name)
-
 
     def _add_row_array(self, scalars, name, deep=True):
         """Add scalars to the vtk object.
@@ -216,99 +154,41 @@ class Table(vtk.vtkTable, DataObject):
             must be kept to avoid a segfault.
 
         """
-        if scalars is None:
-            raise TypeError('Empty array unable to be added')
-
-        if not isinstance(scalars, np.ndarray):
-            scalars = np.array(scalars)
-
-        if self.n_rows == 0 or self.n_columns == 0:
-            self.n_rows = scalars.shape[0]
-        elif scalars.shape[0] != self.n_rows:
-            raise Exception('Number of scalars must match the number of rows (%d)'
-                            % self.n_rows)
-
-        if not scalars.flags.c_contiguous:
-            scalars = np.ascontiguousarray(scalars)
-        if scalars.dtype == np.bool:
-            scalars = scalars.view(np.uint8)
-            self._row_bool_array_names.append(name)
-
-        vtkarr = convert_array(scalars, deep=deep)
-        vtkarr.SetName(name)
-        self.AddColumn(vtkarr)
-
-
+        self.row_arrays[name] = scalars
 
     def __getitem__(self, index):
         """Search row data for an array."""
-        if isinstance(index, str):
-            name = index
-        elif isinstance(index, int):
-            name = self.GetRowData().GetArrayName(index)
-        else:
-            raise KeyError('Index ({}) not understood. Index must be a string name or a tuple of string name and string preference.'.format(index))
-        return row_array(self, name)
-
+        return self._row_array(name=index)
 
     def _ipython_key_completions_(self):
         return self.keys()
-
 
     def get(self, index):
         """Get an array by its name."""
         return self[index]
 
-
     def __setitem__(self, name, scalars):
         """Add/set an array in the row_arrays."""
-        if scalars is None:
-            raise TypeError('Empty array unable to be added')
-        if not isinstance(scalars, np.ndarray):
-            scalars = np.array(scalars)
         self.row_arrays[name] = scalars
-
 
     def _remove_array(self, field, key):
         """Remove a single array by name from each field (internal helper)."""
-        field = parse_field_choice(field)
-        if field == ROW_DATA_FIELD:
-            self.GetRowData().RemoveArray(key)
-        else:
-            raise NotImplementedError('Not able to remove arrays from the ({}) data fiedl'.format(field))
-        return
-
+        self.row_arrays.remove(key)
 
     def __delitem__(self, name):
         """Remove an array by the specified name."""
         del self.row_arrays[name]
 
-
     def __iter__(self):
         """Return the iterator across all arrays."""
-        self._iter_n = 0
-        return self
-
-
-    def next(self):
-        """Get the next block from the iterator."""
-        if self._iter_n < self.n_arrays:
-            result = self[self._iter_n]
-            self._iter_n += 1
-            return result
-        else:
-            raise StopIteration
-
-
-    __next__ = next
-
+        for array_name in self.row_arrays:
+            yield self.row_arrays[array_name]
 
     def _get_attrs(self):
         """Return the representation methods."""
         attrs = []
         attrs.append(("N Rows", self.n_rows, "{}"))
         return attrs
-
 
     def _repr_html_(self):
         """Return a pretty representation for Jupyter notebooks.
@@ -354,16 +234,13 @@ class Table(vtk.vtkTable, DataObject):
             fmt += "</td></tr> </table>"
         return fmt
 
-
     def __repr__(self):
         """Return the object representation."""
         return self.head(display=False, html=False)
 
-
     def __str__(self):
         """Return the object string representation."""
         return self.head(display=False, html=False)
-
 
     def to_pandas(self):
         """Create a Pandas DataFrame from this Table."""
@@ -374,12 +251,10 @@ class Table(vtk.vtkTable, DataObject):
             data_frame[name] = array
         return data_frame
 
-
     def save(self, *args, **kwargs):
         """Save the table."""
         raise NotImplementedError("Please use the `to_pandas` method and "
                                   "harness Pandas' wonderful file IO methods.")
-
 
     def get_data_range(self, arr=None, preference='row'):
         """Get the non-NaN min and max of a named array.
@@ -391,8 +266,8 @@ class Table(vtk.vtkTable, DataObject):
             is used
 
         preference : str, optional
-            When scalars is specified, this is the perfered array type to
-            search for in the dataset.  Must be either ``'row'`` or
+            When scalars is specified, this is the preferred array type
+            to search for in the dataset.  Must be either ``'row'`` or
             ``'field'``.
 
         """
@@ -406,23 +281,6 @@ class Table(vtk.vtkTable, DataObject):
             return (np.nan, np.nan)
         # Use the array range
         return np.nanmin(arr), np.nanmax(arr)
-
-
-
-class RowScalarsDict(_ScalarsDict):
-    """Update internal row data when an array is added or removed from the dictionary."""
-
-    def __init__(self, data):
-        """Initialize te row scalars dict."""
-        _ScalarsDict.__init__(self, data)
-        self.remover = lambda key: self.data._remove_array(ROW_DATA_FIELD, key)
-        self.modifier = lambda *args: self.data.GetRowData().Modified()
-
-
-    def adder(self, scalars, name, set_active=False, deep=True):
-        """Add a row array."""
-        self.data._add_row_array(scalars, name, deep=deep)
-
 
 
 class Texture(vtk.vtkTexture):
@@ -454,42 +312,59 @@ class Texture(vtk.vtkTexture):
         self.SetInputDataObject(image)
         return self.Update()
 
-
     def _from_array(self, image):
-        if image.ndim != 3 or image.shape[2] != 3:
-            raise AssertionError('Input image must be nn by nm by RGB')
-        grid = pyvista.UniformGrid((image.shape[1], image.shape[0], 1))
-        grid.point_arrays['Image'] = np.flip(image.swapaxes(0,1), axis=1).reshape((-1, 3), order='F')
-        grid.set_active_scalars('Image')
-        return self._from_image_data(grid)
+        if image.ndim not in [2,3]:
+            # we support 2 [single component image] or 3 [e.g. rgb or rgba] dims
+            raise ValueError('Input image must be nn by nm by RGB[A]')
 
+        if image.ndim == 3:
+            if image.shape[2] != 3 and image.shape[2] != 4:
+                raise ValueError('Third dimension of the array must be of size 3 (RGB) or 4 (RGBA)')
+
+            n_components = image.shape[2]
+
+        elif image.ndim == 2:
+            n_components = 1
+
+        grid = pyvista.UniformGrid((image.shape[1], image.shape[0], 1))
+        grid.point_arrays['Image'] = np.flip(image.swapaxes(0, 1), axis=1).reshape((-1, n_components), order='F')
+        grid.set_active_scalars('Image')
+
+        return self._from_image_data(grid)
 
     def flip(self, axis):
         """Flip this texture inplace along the specified axis. 0 for X and 1 for Y."""
         if axis < 0 or axis > 1:
-            raise RuntimeError("Axis {} out of bounds".format(axis))
+            raise ValueError("Axis {} out of bounds".format(axis))
         ax = [1, 0]
         array = self.to_array()
         array = np.flip(array, axis=ax[axis])
         return self._from_array(array)
 
-
     def to_image(self):
         """Return the texture as an image."""
         return self.GetInput()
 
+    @property
+    def n_components(self):
+        """Components in the image (e.g. 3 [or 4] for RGB[A])."""
+        image = self.to_image()
+        return image.active_scalars.shape[1]
 
     def to_array(self):
         """Return the texture as an array."""
         image = self.to_image()
-        shape = (image.dimensions[0], image.dimensions[1], 3)
-        return np.flip(image.active_scalars.reshape(shape, order='F'), axis=1).swapaxes(1,0)
 
+        if image.active_scalars.ndim > 1:
+            shape = (image.dimensions[1], image.dimensions[0], self.n_components)
+        else:
+            shape = (image.dimensions[1], image.dimensions[0])
+
+        return np.flip(image.active_scalars.reshape(shape, order='F'), axis=1).swapaxes(1,0)
 
     def plot(self, *args, **kwargs):
         """Plot the texture as image data by itself."""
         return self.to_image().plot(*args, **kwargs)
-
 
     @property
     def repeat(self):
@@ -499,3 +374,7 @@ class Texture(vtk.vtkTexture):
     @repeat.setter
     def repeat(self, flag):
         self.SetRepeat(flag)
+
+    def copy(self):
+        """Make a copy of this textrue."""
+        return Texture(self.to_image().copy())

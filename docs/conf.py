@@ -1,8 +1,14 @@
 import os
 import sys
+import datetime
 if sys.version_info >= (3, 0):
     import faulthandler
     faulthandler.enable()
+
+sys.path.insert(0, os.path.abspath('.'))
+import make_external_gallery
+make_external_gallery.make_example_gallery()
+
 
 # -- pyvista configuration ---------------------------------------------------
 import pyvista
@@ -18,6 +24,17 @@ pyvista.rcParams['window_size'] = np.array([1024, 768]) * 2
 pyvista.FIGURE_PATH = os.path.join(os.path.abspath('./images/'), 'auto-generated/')
 if not os.path.exists(pyvista.FIGURE_PATH):
     os.makedirs(pyvista.FIGURE_PATH)
+
+# necessary when building the sphinx gallery
+pyvista.BUILDING_GALLERY = True
+
+# SG warnins
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    message='Matplotlib is currently using agg, which is a non-GUI backend, so cannot show the figure.',
+)
 
 # -- General configuration ------------------------------------------------
 numfig = False
@@ -35,6 +52,7 @@ extensions = ['sphinx.ext.autodoc',
               'sphinx_copybutton',
               'sphinx_gallery.gen_gallery',
               'sphinx.ext.extlinks',
+              'sphinx.ext.coverage',
               ]
 
 
@@ -52,7 +70,8 @@ master_doc = 'index'
 
 # General information about the project.
 project = u'PyVista'
-copyright = u'2017-2019, The PyVista Developers'
+year = datetime.date.today().year
+copyright = u'2017-{}, The PyVista Developers'.format(year)
 author = u'Alex Kaszynski and Bane Sullivan'
 
 # The version info for the project you're documenting, acts as replacement for
@@ -89,9 +108,7 @@ from sphinx_gallery.sorting import FileNameSortKey
 
 sphinx_gallery_conf = {
     # path to your examples scripts
-    "examples_dirs": [
-        "../examples/",
-    ],
+    "examples_dirs": ["../examples/"],
     # path where to save gallery generated examples
     "gallery_dirs": ["examples"],
     # Patter to search for example files
@@ -120,7 +137,7 @@ html_theme = 'sphinx_rtd_theme'
 html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
 html_context = {
     # Enable the "Edit in GitHub link within the header of each page.
-    'display_github': True,
+    'display_github': False,
     # Set the following variables to generate the resulting github URL for each page.
     # Format Template: https://{{ github_host|default("github.com") }}/{{ github_user }}/{{ github_repo }}/blob/{{ github_version }}{{ conf_py_path }}{{ pagename }}{{ suffix }}
     'github_user': 'pyvista',
@@ -260,10 +277,10 @@ class AutoAutoSummary(Autosummary):
         except:
             print('Something went wrong when autodocumenting {}'.format(clazz))
         finally:
-            return super(AutoAutoSummary, self).run()
+            return super().run()
 
 def setup(app):
     AutoAutoSummary.app = app
     app.add_directive('autoautosummary', AutoAutoSummary)
-    app.add_stylesheet("style.css")
-    app.add_stylesheet("copybutton.css")
+    app.add_css_file("style.css")
+    app.add_css_file("copybutton.css")

@@ -5,11 +5,10 @@ import vtk
 
 import pyvista
 from pyvista.utilities import NORMALS, generate_plane, get_array, try_callback
-
 from .theme import rcParams, parse_color
 
 
-class WidgetHelper(object):
+class WidgetHelper:
     """An internal class to manage widgets.
 
     It also manages and other helper methods involving widgets.
@@ -60,7 +59,7 @@ class WidgetHelper(object):
 
         """
         if hasattr(self, 'notebook') and self.notebook:
-            raise AssertionError('Box widget not available in notebook plotting')
+            raise TypeError('Box widget not available in notebook plotting')
         if not hasattr(self, 'iren'):
             raise AttributeError('Widgets must be used with an intereactive renderer. No off screen plotting.')
         if not hasattr(self, "box_widgets"):
@@ -102,7 +101,6 @@ class WidgetHelper(object):
         self.box_widgets.append(box_widget)
         return box_widget
 
-
     def clear_box_widgets(self):
         """Disable all of the box widgets."""
         if hasattr(self, 'box_widgets'):
@@ -110,7 +108,6 @@ class WidgetHelper(object):
                 widget.Off()
             del self.box_widgets
         return
-
 
     def add_mesh_clip_box(self, mesh, invert=False, rotation_enabled=True,
                           widget_color=None, outline_translation=True,
@@ -140,9 +137,10 @@ class WidgetHelper(object):
             control how the mesh is displayed.
 
         """
-        name = kwargs.get('name', str(hex(id(mesh))))
+        name = kwargs.get('name', mesh.memory_address)
         rng = mesh.get_data_range(kwargs.get('scalars', None))
         kwargs.setdefault('clim', kwargs.pop('rng', rng))
+        mesh.set_active_scalars(kwargs.get('scalars', mesh.active_scalars_name))
 
         self.add_mesh(mesh.outline(), name=name+"outline", opacity=0.0)
 
@@ -243,7 +241,7 @@ class WidgetHelper(object):
 
         """
         if hasattr(self, 'notebook') and self.notebook:
-            raise AssertionError('Plane widget not available in notebook plotting')
+            raise TypeError('Plane widget not available in notebook plotting')
         if not hasattr(self, 'iren'):
             raise AttributeError('Widgets must be used with an intereactive renderer. No off screen plotting.')
         if not hasattr(self, "plane_widgets"):
@@ -344,7 +342,6 @@ class WidgetHelper(object):
         self.plane_widgets.append(plane_widget)
         return plane_widget
 
-
     def clear_plane_widgets(self):
         """Disable all of the plane widgets."""
         if hasattr(self, 'plane_widgets'):
@@ -352,7 +349,6 @@ class WidgetHelper(object):
                 widget.Off()
             del self.plane_widgets
         return
-
 
     def add_mesh_clip_plane(self, mesh, normal='x', invert=False,
                             widget_color=None, value=0.0, assign_to_axis=None,
@@ -382,9 +378,10 @@ class WidgetHelper(object):
             control how the mesh is displayed.
 
         """
-        name = kwargs.get('name', str(hex(id(mesh))))
+        name = kwargs.get('name', mesh.memory_address)
         rng = mesh.get_data_range(kwargs.get('scalars', None))
         kwargs.setdefault('clim', kwargs.pop('rng', rng))
+        mesh.set_active_scalars(kwargs.get('scalars', mesh.active_scalars_name))
 
         self.add_mesh(mesh.outline(), name=name+"outline", opacity=0.0)
 
@@ -422,8 +419,6 @@ class WidgetHelper(object):
 
         return actor
 
-
-
     def add_mesh_slice(self, mesh, normal='x', generate_triangles=False,
                        widget_color=None, assign_to_axis=None,
                        tubing=False, origin_translation=True,
@@ -453,9 +448,10 @@ class WidgetHelper(object):
             control how the mesh is displayed.
 
         """
-        name = kwargs.get('name', str(hex(id(mesh))))
+        name = kwargs.get('name', mesh.memory_address)
         rng = mesh.get_data_range(kwargs.get('scalars', None))
         kwargs.setdefault('clim', kwargs.pop('rng', rng))
+        mesh.set_active_scalars(kwargs.get('scalars', mesh.active_scalars_name))
 
         self.add_mesh(mesh.outline(), name=name+"outline", opacity=0.0)
 
@@ -488,7 +484,6 @@ class WidgetHelper(object):
 
         return actor
 
-
     def add_mesh_slice_orthogonal(self, mesh, generate_triangles=False,
                                   widget_color=None, tubing=False, **kwargs):
         """Slice a mesh with three interactive planes.
@@ -508,8 +503,6 @@ class WidgetHelper(object):
             actors.append(a)
 
         return actors
-
-
 
     def add_line_widget(self, callback, bounds=None, factor=1.25,
                         resolution=100, color=None, use_vertices=False,
@@ -550,7 +543,7 @@ class WidgetHelper(object):
 
         """
         if hasattr(self, 'notebook') and self.notebook:
-            raise AssertionError('Line widget not available in notebook plotting')
+            raise TypeError('Line widget not available in notebook plotting')
         if not hasattr(self, 'iren'):
             raise AttributeError('Widgets must be used with an intereactive renderer. No off screen plotting.')
         if not hasattr(self, "line_widgets"):
@@ -591,7 +584,6 @@ class WidgetHelper(object):
         self.line_widgets.append(line_widget)
         return line_widget
 
-
     def clear_line_widgets(self):
         """Disable all of the line widgets."""
         if hasattr(self, 'line_widgets'):
@@ -600,11 +592,99 @@ class WidgetHelper(object):
             del self.line_widgets
         return
 
+    def add_text_slider_widget(self, callback, data, value=None,
+                              pointa=(.4, .9), pointb=(.9, .9),
+                              color=None, event_type='end'):
+        """Add a text slider bar widget.
+
+        This is useless without a callback function. You can pass a callable
+        function that takes a single argument, the value of this slider widget,
+        and performs a task with that value.
+
+        Parameters
+        ----------
+        callback : callable
+            The method called every time the slider is updated. This should take
+            a single parameter: the float value of the slider
+
+        data: list
+            The list of possible values displayed on the slider bar
+
+        value : float, optional
+            The starting value of the slider
+
+        pointa : tuple(float)
+            The relative coordinates of the left point of the slider on the
+            display port
+
+        pointb : tuple(float)
+            The relative coordinates of the right point of the slider on the
+            display port
+
+        color : string or 3 item list, optional, defaults to white
+            Either a string, rgb list, or hex color string.
+
+        event_type: str
+            Either 'start', 'end' or 'always', this defines how often the
+            slider interacts with the callback.
+
+        Returns
+        -------
+        slider_widget: vtk.vtkSliderWidget
+            The VTK slider widget configured to display text.
+
+        """
+        if not isinstance(data, list):
+            raise TypeError("The `data` parameter must be a list "
+                            "but {} was given : ", type(data))
+        n_states = len(data)
+        if n_states == 0:
+            raise ValueError("The input list of values is empty")
+        delta = (n_states - 1) / float(n_states)
+        # avoid division by zero in case there is only one element
+        delta = 1 if delta == 0 else delta
+
+        def _the_callback(value):
+            if isinstance(value, float):
+                idx = int(value / delta)
+                # handle limit index
+                if idx == n_states:
+                    idx = n_states - 1
+                if hasattr(callback, '__call__'):
+                    try_callback(callback, data[idx])
+            return
+
+        slider_widget = self.add_slider_widget(callback=_the_callback, rng=[0, n_states - 1],
+                                               value=value,
+                                               pointa=pointa, pointb=pointb,
+                                               color=color, event_type=event_type)
+        slider_rep = slider_widget.GetRepresentation()
+        slider_rep.ShowSliderLabelOff()
+
+        def title_callback(widget, event):
+            value = widget.GetRepresentation().GetValue()
+            idx = int(value / delta)
+            # handle limit index
+            if idx == n_states:
+                idx = n_states - 1
+            slider_rep.SetTitleText(data[idx])
+
+        if event_type == 'start':
+            slider_widget.AddObserver(vtk.vtkCommand.StartInteractionEvent, title_callback)
+        elif event_type == 'end':
+            slider_widget.AddObserver(vtk.vtkCommand.EndInteractionEvent, title_callback)
+        elif event_type == 'always':
+            slider_widget.AddObserver(vtk.vtkCommand.InteractionEvent, title_callback)
+        else:
+            raise ValueError("Expected value for `event_type` is 'start',"
+                             " 'end' or 'always': {} was given.".format(event_type))
+        title_callback(slider_widget, None)
+        return slider_widget
 
     def add_slider_widget(self, callback, rng, value=None, title=None,
                           pointa=(.4, .9), pointb=(.9, .9),
                           color=None, pass_widget=False,
-                          event_type='end'):
+                          event_type='end', style=None):
         """Add a slider bar widget.
 
         This is useless without a callback function. You can pass a callable
@@ -641,13 +721,16 @@ class WidgetHelper(object):
             If true, the widget will be passed as the last argument of the
             callback
 
-        event_type: str
+        event_type : str
             Either 'start', 'end' or 'always', this defines how often the
             slider interacts with the callback.
 
+        style : str, optional
+            The name of the slider style. The list of available styles are in
+            ``rcParams['slider_style']``. Defaults to None.
         """
         if hasattr(self, 'notebook') and self.notebook:
-            raise AssertionError('Slider widget not available in notebook plotting')
+            raise TypeError('Slider widget not available in notebook plotting')
         if not hasattr(self, 'iren'):
             raise AttributeError('Widgets must be used with an intereactive renderer. No off screen plotting.')
 
@@ -662,6 +745,12 @@ class WidgetHelper(object):
         if color is None:
             color = rcParams['font']['color']
 
+        def normalize(point, viewport):
+            return (point[0]*(viewport[2]-viewport[0]),point[1]*(viewport[3]-viewport[1]))
+
+        pointa = normalize(pointa, self.renderer.GetViewport())
+        pointb = normalize(pointb, self.renderer.GetViewport())
+
         slider_rep = vtk.vtkSliderRepresentation2D()
         slider_rep.SetPickable(False)
         slider_rep.SetMinimumValue(min)
@@ -673,13 +762,31 @@ class WidgetHelper(object):
         slider_rep.GetCapProperty().SetColor(parse_color(color))
         slider_rep.GetLabelProperty().SetColor(parse_color(color))
         slider_rep.GetTubeProperty().SetColor(parse_color(color))
-        slider_rep.GetPoint1Coordinate().SetCoordinateSystemToNormalizedViewport()
+        slider_rep.GetPoint1Coordinate().SetCoordinateSystemToNormalizedDisplay()
         slider_rep.GetPoint1Coordinate().SetValue(pointa[0], pointa[1])
-        slider_rep.GetPoint2Coordinate().SetCoordinateSystemToNormalizedViewport()
+        slider_rep.GetPoint2Coordinate().SetCoordinateSystemToNormalizedDisplay()
         slider_rep.GetPoint2Coordinate().SetValue(pointb[0], pointb[1])
         slider_rep.SetSliderLength(0.05)
         slider_rep.SetSliderWidth(0.05)
         slider_rep.SetEndCapLength(0.01)
+
+        if style is not None:
+            if not isinstance(style, str):
+                raise TypeError("Expected type for ``style`` is str but"
+                                " {} was given.".format(type(style)))
+            style_params = rcParams['slider_style'].get(style, None)
+            if style_params is None:
+                raise KeyError("The requested style does not exist: "
+                               "{}. The styles available are {}.".format(style,
+                                   list(rcParams['slider_style'].keys())))
+            slider_rep.SetSliderLength(style_params['slider_length'])
+            slider_rep.SetSliderWidth(style_params['slider_width'])
+            slider_rep.GetSliderProperty().SetColor(style_params['slider_color'])
+            slider_rep.SetTubeWidth(style_params['tube_width'])
+            slider_rep.GetTubeProperty().SetColor(style_params['tube_color'])
+            slider_rep.GetCapProperty().SetOpacity(style_params['cap_opacity'])
+            slider_rep.SetEndCapLength(style_params['cap_length'])
+            slider_rep.SetEndCapWidth(style_params['cap_width'])
 
         def _the_callback(widget, event):
             value = widget.GetRepresentation().GetValue()
@@ -712,7 +819,6 @@ class WidgetHelper(object):
         self.slider_widgets.append(slider_widget)
         return slider_widget
 
-
     def clear_slider_widgets(self):
         """Disable all of the slider widgets."""
         if hasattr(self, 'slider_widgets'):
@@ -720,7 +826,6 @@ class WidgetHelper(object):
                 widget.Off()
             del self.slider_widgets
         return
-
 
     def add_mesh_threshold(self, mesh, scalars=None, invert=False,
                            widget_color=None, preference='cell',
@@ -752,29 +857,29 @@ class WidgetHelper(object):
         """
         if isinstance(mesh, pyvista.MultiBlock):
             raise TypeError('MultiBlock datasets are not supported for threshold widget.')
-        name = kwargs.get('name', str(hex(id(mesh))))
+        name = kwargs.get('name', mesh.memory_address)
         if scalars is None:
             field, scalars = mesh.active_scalars_info
         arr, field = get_array(mesh, scalars, preference=preference, info=True)
         if arr is None:
-            raise AssertionError('No arrays present to threshold.')
+            raise ValueError('No arrays present to threshold.')
         rng = mesh.get_data_range(scalars)
         kwargs.setdefault('clim', kwargs.pop('rng', rng))
         if title is None:
             title = scalars
+        mesh.set_active_scalars(scalars)
 
         self.add_mesh(mesh.outline(), name=name+"outline", opacity=0.0)
 
         alg = vtk.vtkThreshold()
         alg.SetInputDataObject(mesh)
-        alg.SetInputArrayToProcess(0, 0, 0, field, scalars) # args: (idx, port, connection, field, name)
+        alg.SetInputArrayToProcess(0, 0, 0, field.value, scalars) # args: (idx, port, connection, field, name)
         alg.SetUseContinuousCellRange(continuous)
 
         if not hasattr(self, "threshold_meshes"):
             self.threshold_meshes = []
         threshold_mesh = pyvista.wrap(alg.GetOutput())
         self.threshold_meshes.append(threshold_mesh)
-
 
         def callback(value):
             if invert:
@@ -784,7 +889,6 @@ class WidgetHelper(object):
             alg.Update()
             threshold_mesh.shallow_copy(alg.GetOutput())
 
-
         self.add_slider_widget(callback=callback, rng=rng, title=title,
                                color=widget_color, pointa=pointa,
                                pointb=pointb)
@@ -793,7 +897,6 @@ class WidgetHelper(object):
         actor = self.add_mesh(threshold_mesh, scalars=scalars, **kwargs)
 
         return actor
-
 
     def add_mesh_isovalue(self, mesh, scalars=None, compute_normals=False,
                           compute_gradients=False, compute_scalars=True,
@@ -813,7 +916,7 @@ class WidgetHelper(object):
             The input dataset to add to the scene and contour
 
         scalars : str
-            The string name of the scalars on the mesh to threshold and display
+            The string name of the scalars on the mesh to contour and display
 
         kwargs : dict
             All additional keyword arguments are passed to ``add_mesh`` to
@@ -822,29 +925,30 @@ class WidgetHelper(object):
         """
         if isinstance(mesh, pyvista.MultiBlock):
             raise TypeError('MultiBlock datasets are not supported for this widget.')
-        name = kwargs.get('name', str(hex(id(mesh))))
+        name = kwargs.get('name', mesh.memory_address)
         # set the array to contour on
         if mesh.n_arrays < 1:
-            raise AssertionError('Input dataset for the contour filter must have data arrays.')
+            raise ValueError('Input dataset for the contour filter must have data arrays.')
         if scalars is None:
             field, scalars = mesh.active_scalars_info
         else:
             _, field = get_array(mesh, scalars, preference=preference, info=True)
         # NOTE: only point data is allowed? well cells works but seems buggy?
-        if field != pyvista.POINT_DATA_FIELD:
-            raise AssertionError('Contour filter only works on Point data. Array ({}) is in the Cell data.'.format(scalars))
+        if field != pyvista.FieldAssociation.POINT:
+            raise TypeError('Contour filter only works on Point data. Array ({}) is in the Cell data.'.format(scalars))
 
         rng = mesh.get_data_range(scalars)
         kwargs.setdefault('clim', kwargs.pop('rng', rng))
         if title is None:
             title = scalars
+        mesh.set_active_scalars(scalars)
 
         alg = vtk.vtkContourFilter()
         alg.SetInputDataObject(mesh)
         alg.SetComputeNormals(compute_normals)
         alg.SetComputeGradients(compute_gradients)
         alg.SetComputeScalars(compute_scalars)
-        alg.SetInputArrayToProcess(0, 0, 0, field, scalars)
+        alg.SetInputArrayToProcess(0, 0, 0, field.value, scalars)
         alg.SetNumberOfContours(1) # Only one contour level
 
         self.add_mesh(mesh.outline(), name=name+"outline", opacity=0.0)
@@ -867,7 +971,6 @@ class WidgetHelper(object):
         actor = self.add_mesh(isovalue_mesh, scalars=scalars, **kwargs)
 
         return actor
-
 
     def add_spline_widget(self, callback, bounds=None, factor=1.25,
                           n_hanldes=5, resolution=25, color="yellow",
@@ -916,7 +1019,7 @@ class WidgetHelper(object):
 
         """
         if hasattr(self, 'notebook') and self.notebook:
-            raise AssertionError('Spline widget not available in notebook plotting')
+            raise TypeError('Spline widget not available in notebook plotting')
         if not hasattr(self, 'iren'):
             raise AttributeError('Widgets must be used with an intereactive renderer. No off screen plotting.')
 
@@ -961,14 +1064,12 @@ class WidgetHelper(object):
         self.spline_widgets.append(spline_widget)
         return spline_widget
 
-
     def clear_spline_widgets(self):
         """Disable all of the spline widgets."""
         if hasattr(self, 'spline_widgets'):
             for widget in self.spline_widgets:
                 widget.Off()
             del self.spline_widgets
-
 
     def add_mesh_slice_spline(self, mesh, generate_triangles=False,
                               n_hanldes=5, resolution=25,
@@ -997,9 +1098,10 @@ class WidgetHelper(object):
             control how the mesh is displayed.
 
         """
-        name = kwargs.get('name', str(hex(id(mesh))))
+        name = kwargs.get('name', mesh.memory_address)
         rng = mesh.get_data_range(kwargs.get('scalars', None))
         kwargs.setdefault('clim', kwargs.pop('rng', rng))
+        mesh.set_active_scalars(kwargs.get('scalars', mesh.active_scalars_name))
 
         self.add_mesh(mesh.outline(), name=name+"outline", opacity=0.0)
 
@@ -1032,7 +1134,6 @@ class WidgetHelper(object):
         actor = self.add_mesh(spline_sliced_mesh, **kwargs)
 
         return actor
-
 
     def add_sphere_widget(self, callback, center=(0, 0, 0), radius=0.5,
                           theta_resolution=30, phi_resolution=30,
@@ -1084,7 +1185,7 @@ class WidgetHelper(object):
 
         """
         if hasattr(self, 'notebook') and self.notebook:
-            raise AssertionError('Sphere widget not available in notebook plotting')
+            raise TypeError('Sphere widget not available in notebook plotting')
         if not hasattr(self, 'iren'):
             raise AttributeError('Widgets must be used with an intereactive renderer. No off screen plotting.')
 
@@ -1152,7 +1253,6 @@ class WidgetHelper(object):
 
         return sphere_widget
 
-
     def clear_sphere_widgets(self):
         """Disable all of the sphere widgets."""
         if hasattr(self, 'sphere_widgets'):
@@ -1161,6 +1261,107 @@ class WidgetHelper(object):
             del self.sphere_widgets
         return
 
+    def add_checkbox_button_widget(self, callback, value=False,
+                                   position=(10., 10.), size=50, border_size=5,
+                                   color_on='blue', color_off='grey',
+                                   background_color='white'):
+        """Add a checkbox button widget to the scene.
+
+        This is useless without a callback function. You can pass a callable
+        function that takes a single argument, the state of this button widget
+        and performs a task with that value.
+
+        Parameters
+        ----------
+        callback : callable
+            The method called every time the button is clicked. This should take
+            a single parameter: the bool value of the button
+
+        value : bool
+            The default state of the button
+
+        position: tuple(float)
+            The absolute coordinates of the bottom left point of the button
+
+        size : int
+            The size of the button in number of pixels
+
+        border_size : int
+            The size of the borders of the button in pixels
+
+        color_on : string or 3 item list, optional
+            The color used when the button is checked. Default is 'blue'
+
+        color_off : string or 3 item list, optional
+            The color used when the button is not checked. Default is 'grey'
+
+        background_color : string or 3 item list, optional
+            The background color of the button. Default is 'white'
+
+        Returns
+        -------
+        button_widget: vtk.vtkButtonWidget
+            The VTK button widget configured as a checkbox button.
+
+        """
+        if not hasattr(self, "button_widgets"):
+            self.button_widgets = []
+
+        def create_button(color1, color2, color3, dims=[size, size, 1]):
+            color1 = np.array(parse_color(color1)) * 255
+            color2 = np.array(parse_color(color2)) * 255
+            color3 = np.array(parse_color(color3)) * 255
+
+            n_points = dims[0] * dims[1]
+            button = pyvista.UniformGrid(dims)
+            arr = np.array([color1] * n_points).reshape(dims[0], dims[1], 3)  # fill with color1
+            arr[1:dims[0]-1, 1:dims[1]-1] = color2  # apply color2
+            arr[
+                border_size:dims[0]-border_size,
+                border_size:dims[1]-border_size
+            ] = color3  # apply color3
+            button.point_arrays['texture'] = arr.reshape(n_points, 3).astype(np.uint8)
+            return button
+
+        button_on = create_button(color_on, background_color, color_on)
+        button_off = create_button(color_on, background_color, color_off)
+
+        bounds = [
+            position[0], position[0] + size,
+            position[1], position[1] + size,
+            0., 0.
+        ]
+
+        button_rep = vtk.vtkTexturedButtonRepresentation2D()
+        button_rep.SetNumberOfStates(2)
+        button_rep.SetState(value)
+        button_rep.SetButtonTexture(0, button_off)
+        button_rep.SetButtonTexture(1, button_on)
+        button_rep.SetPlaceFactor(1)
+        button_rep.PlaceWidget(bounds)
+
+        button_widget = vtk.vtkButtonWidget()
+        button_widget.SetInteractor(self.iren)
+        button_widget.SetRepresentation(button_rep)
+        button_widget.SetCurrentRenderer(self.renderer)
+        button_widget.On()
+
+        def _the_callback(widget, event):
+            state = widget.GetRepresentation().GetState()
+            if hasattr(callback, '__call__'):
+                try_callback(callback, bool(state))
+
+        button_widget.AddObserver(vtk.vtkCommand.StateChangedEvent, _the_callback)
+        self.button_widgets.append(button_widget)
+        return button_widget
+
+    def clear_button_widgets(self):
+        """Disable all of the button widgets."""
+        if hasattr(self, 'button_widgets'):
+            for widget in self.button_widgets:
+                widget.Off()
+            del self.button_widgets
+        return
 
     def close(self):
         """Close the widgets."""
@@ -1170,3 +1371,4 @@ class WidgetHelper(object):
         self.clear_slider_widgets()
         self.clear_sphere_widgets()
         self.clear_spline_widgets()
+        self.clear_button_widgets()

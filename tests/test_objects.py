@@ -1,8 +1,6 @@
 """
-Tests for non-spatially referenced ojects
+Tests for non-spatially referenced objects
 """
-import sys
-
 import numpy as np
 import pytest
 import vtk
@@ -14,7 +12,6 @@ try:
     import pandas as pd
 except ImportError:
     pd = None
-
 
 
 def test_table_init(tmpdir):
@@ -33,6 +30,11 @@ def test_table_init(tmpdir):
     for i in range(nc):
         assert np.allclose(arrays[:,i], table[i])
 
+    with pytest.raises(ValueError):
+        pyvista.Table(np.random.rand(100))
+
+    with pytest.raises(ValueError):
+        pyvista.Table(np.random.rand(100, 2, 3))
 
     # create from dictionary
     array_dict = {}
@@ -47,7 +49,7 @@ def test_table_init(tmpdir):
         assert np.allclose(arrays[:,i], table['foo{}'.format(i)])
 
     dataset = examples.load_hexbeam()
-    array_dict = dataset.point_arrays
+    array_dict = dict(dataset.point_arrays)
     table = pyvista.Table(array_dict)
     assert table.n_rows == dataset.n_points
     assert table.n_columns == len(array_dict)
@@ -68,7 +70,11 @@ def test_table_init(tmpdir):
     reader.Update()
 
     # Test init
-    table = pyvista.Table(reader.GetOutput())
+    table = pyvista.Table(reader.GetOutput(), deep=True)
+    assert isinstance(table, vtk.vtkTable)
+    assert isinstance(table, pyvista.Table)
+
+    table = pyvista.Table(reader.GetOutput(), deep=False)
     assert isinstance(table, vtk.vtkTable)
     assert isinstance(table, pyvista.Table)
 
@@ -84,8 +90,10 @@ def test_table_init(tmpdir):
     for i in range(nc):
         assert np.allclose(arrays[:,i], table[i])
 
-    return
+    with pytest.raises(TypeError):
+        pyvista.Table("foo")
 
+    return
 
 
 def test_table_row_arrays():
@@ -144,12 +152,12 @@ def test_table_row_arrays():
 def test_table_row_np_bool():
     n = 50
     table = pyvista.Table()
-    bool_arr = np.zeros(n, np.bool)
+    bool_arr = np.zeros(n, np.bool_)
     table.row_arrays['bool_arr'] = bool_arr
     bool_arr[:] = True
     assert table.row_arrays['bool_arr'].all()
     assert table._row_array('bool_arr').all()
-    assert table._row_array('bool_arr').dtype == np.bool
+    assert table._row_array('bool_arr').dtype == np.bool_
 
 
 def test_table_row_uint8():

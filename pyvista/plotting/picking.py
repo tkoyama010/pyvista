@@ -1,13 +1,15 @@
 """Module managing picking events."""
 
 import logging
+
 import numpy as np
 import vtk
 
 import pyvista
 from pyvista.utilities import try_callback
 
-class PickingHelper(object):
+
+class PickingHelper:
     """An internal class to hold picking related features."""
 
     picked_cells = None
@@ -20,7 +22,6 @@ class PickingHelper(object):
         """Get the pick position/area as x0, y0, x1, y1."""
         return self.renderer.get_pick_position()
 
-
     def enable_cell_picking(self, mesh=None, callback=None, through=True,
                             show=True, show_message=True, style='wireframe',
                             line_width=5, color='pink', font_size=18,
@@ -31,20 +32,26 @@ class PickingHelper(object):
         turn it off. Selection will be saved to ``self.picked_cells``. Also
         press "p" to pick a single cell under the mouse location.
 
+        When using ``through=False``, and multiple meshes are being picked,
+        the picked cells in ````self.picked_cells`` will be a
+        :class:`MultiBlock` dataset for each mesh's selection.
+
         Uses last input mesh for input by default.
 
         Warning
         -------
-        Visible cell picking (``through=False``) is known to not perform well
-        and produce incorrect selections on non-triangulated meshes if using
-        any grpahics card other than NVIDIA. A warning will be thrown if the
-        mesh is not purely triangles when using visible cell selection.
+        Visible cell picking (``through=False``) will only work if the mesh is
+        displayed with a ``'surface'`` representation style (the default).
 
         Parameters
         ----------
         mesh : pyvista.Common, optional
-            UnstructuredGrid grid to select cells from.  Uses last
-            input grid by default.
+            Mesh to select cells from. When ``through`` is ``True``, uses last
+            input mesh by default. When ``through`` is ``False``, all meshes
+            in the scene are available for picking and this argument is
+            ignored. If you would like to only pick a single mesh in the scene,
+            use the ``pickable=False`` argument when adding the other meshes
+            to the scene.
 
         callback : function, optional
             When input, calls this function after a selection is made.
@@ -85,31 +92,38 @@ class PickingHelper(object):
 
         """
         if hasattr(self, 'notebook') and self.notebook:
-            raise AssertionError('Cell picking not available in notebook plotting')
+            raise TypeError('Cell picking not available in notebook plotting')
         if mesh is None:
             if not hasattr(self, 'mesh'):
-                raise Exception('Input a mesh into the Plotter class first or '
-                                'or set it in this function')
+                raise AttributeError('Input a mesh into the Plotter class first or '
+                                     'or set it in this function')
             mesh = self.mesh
 
+        renderer = self.renderer # make sure to consistently use renderer
 
         def end_pick_helper(picker, event_id):
-            if show:
-                # Use try in case selection is empty
-                try:
-                    self.add_mesh(self.picked_cells, name='_cell_picking_selection',
-                                  style=style, color=color,
-                                  line_width=line_width, pickable=False,
-                                  reset_camera=False, **kwargs)
-                except RuntimeError:
-                    pass
+            # Merge the selection into a single mesh
+            picked = self.picked_cells
+            if isinstance(picked, pyvista.MultiBlock):
+                if picked.n_blocks > 0:
+                    picked = picked.combine()
+                else:
+                    picked = pyvista.UnstructuredGrid()
+            # Check if valid
+            is_valid_selection = picked.n_cells > 0
 
-            if callback is not None and self.picked_cells.n_cells > 0:
+            if show and is_valid_selection:
+                # Use try in case selection is empty
+                self.add_mesh(picked, name='_cell_picking_selection',
+                              style=style, color=color,
+                              line_width=line_width, pickable=False,
+                              reset_camera=False, **kwargs)
+
+            if callback is not None and is_valid_selection:
                 try_callback(callback, self.picked_cells)
 
             # TODO: Deactivate selection tool
             return
-
 
         def through_pick_call_back(picker, event_id):
             extract = vtk.vtkExtractGeometry()
@@ -120,43 +134,44 @@ class PickingHelper(object):
             self.picked_cells = pyvista.wrap(extract.GetOutput())
             return end_pick_helper(picker, event_id)
 
-
         def visible_pick_call_back(picker, event_id):
-            x0,y0,x1,y1 = self.get_pick_position()
+            x0,y0,x1,y1 = renderer.get_pick_position()
             selector = vtk.vtkOpenGLHardwareSelector()
             selector.SetFieldAssociation(vtk.vtkDataObject.FIELD_ASSOCIATION_CELLS)
-            selector.SetRenderer(self.renderer)
+            selector.SetRenderer(renderer)
             selector.SetArea(x0,y0,x1,y1)
-            cellids = selector.Select().GetNode(0)
-            if cellids is None:
-                # No selection
-                return
-            selection = vtk.vtkSelection()
-            selection.AddNode(cellids)
-            extract = vtk.vtkExtractSelectedIds()
-            extract.SetInputData(0, mesh)
-            extract.SetInputData(1, selection)
-            extract.Update()
-            self.picked_cells = pyvista.wrap(extract.GetOutput())
+            selection = selector.Select()
+            picked = pyvista.MultiBlock()
+            for node in range(selection.GetNumberOfNodes()):
+                selection_node = selection.GetNode(node)
+                if selection_node is None:
+                    # No selection
+                    continue
+                cids = pyvista.convert_array(selection_node.GetSelectionList())
+                actor = selection_node.GetProperties().Get(vtk.vtkSelectionNode.PROP())
+                if actor.GetProperty().GetRepresentation() != 2: # surface
+                    logging.warning("Display representations other than `surface` will result in incorrect results.")
+                smesh = actor.GetMapper().GetInputAsDataSet()
+                smesh = smesh.copy()
+                smesh["original_cell_ids"] = np.arange(smesh.n_cells)
+                tri_smesh = smesh.extract_surface().triangulate()
+                cids_to_get = tri_smesh.extract_cells(cids)["original_cell_ids"]
+                picked.append(smesh.extract_cells(cids_to_get))
+            if len(picked) == 1:
+                self.picked_cells = picked[0]
+            else:
+                self.picked_cells = picked
             return end_pick_helper(picker, event_id)
-
 
         area_picker = vtk.vtkRenderedAreaPicker()
         if through:
             area_picker.AddObserver(vtk.vtkCommand.EndPickEvent, through_pick_call_back)
         else:
-            # check if mesh is triangulated or not
+            # NOTE: there can be issues with non-triangulated meshes
             # Reference:
             #     https://github.com/pyvista/pyvista/issues/277
             #     https://github.com/pyvista/pyvista/pull/281
-            message = "Surface picking non-triangulated meshes is known to "\
-                      "not work properly with non-NVIDIA GPUs. Please "\
-                      "consider triangulating your mesh:\n"\
-                      "\t`.extract_geometry().triangulate()`"
-            if (not isinstance(mesh, pyvista.PolyData) or
-                    mesh.faces.size % 4 or
-                    not np.all(mesh.faces.reshape(-1, 4)[:,0] == 3)):
-                logging.warning(message)
+            #     https://discourse.vtk.org/t/visible-cell-selection-hardwareselector-py-example-is-not-working-reliably/1262
             area_picker.AddObserver(vtk.vtkCommand.EndPickEvent, visible_pick_call_back)
 
         self.enable_rubber_band_style()
@@ -174,7 +189,6 @@ class PickingHelper(object):
             self._style.StartSelect()
 
         return
-
 
     def enable_point_picking(self, callback=None, show_message=True,
                              font_size=18, color='pink', point_size=10,
@@ -224,7 +238,7 @@ class PickingHelper(object):
 
         """
         if hasattr(self, 'notebook') and self.notebook:
-            raise AssertionError('Point picking not available in notebook plotting')
+            raise TypeError('Point picking not available in notebook plotting')
 
         def _end_pick_event(picker, event):
             self.picked_point = np.array(picker.GetPickPosition())
@@ -255,7 +269,6 @@ class PickingHelper(object):
             self.add_text(str(show_message), font_size=font_size, name='_point_picking_message')
 
         return
-
 
     def enable_path_picking(self, callback=None, show_message=True,
                             font_size=18, color='pink', point_size=10,
@@ -308,16 +321,15 @@ class PickingHelper(object):
         kwargs.setdefault('pickable', False)
 
         def make_line_cells(n_points):
-            # cells = np.full((n_points-1, 3), 2, dtype=np.int)
-            # cells[:, 1] = np.arange(0, n_points-1, dtype=np.int)
-            # cells[:, 2] = np.arange(1, n_points, dtype=np.int)
-            cells = np.arange(0, n_points, dtype=np.int)
+            # cells = np.full((n_points-1, 3), 2, dtype=np.int_)
+            # cells[:, 1] = np.arange(0, n_points-1, dtype=np.int_)
+            # cells[:, 2] = np.arange(1, n_points, dtype=np.int_)
+            cells = np.arange(0, n_points, dtype=np.int_)
             cells = np.insert(cells, 0, n_points)
             return cells
 
         the_points = []
         the_ids = []
-
 
         def _the_callback(mesh, idx):
             if mesh is None:
@@ -347,7 +359,6 @@ class PickingHelper(object):
         return self.enable_point_picking(callback=_the_callback, use_mesh=True,
                 font_size=font_size, show_message=show_message,
                 show_point=False, tolerance=tolerance)
-
 
     def enable_geodesic_picking(self, callback=None, show_message=True,
                                 font_size=18, color='pink', point_size=10,
@@ -442,8 +453,6 @@ class PickingHelper(object):
                 font_size=font_size, show_message=show_message,
                 tolerance=tolerance, show_point=False)
 
-
-
     def enable_horizon_picking(self, callback=None, normal=(0,0,1),
                                width=None, show_message=True,
                                font_size=18, color='pink', point_size=10,
@@ -527,7 +536,6 @@ class PickingHelper(object):
             point_size=point_size, line_width=line_width, show_path=show_path,
             **kwargs)
 
-
     def pick_click_position(self):
         """Get corresponding click location in the 3D plot."""
         if self.click_position is None:
@@ -536,7 +544,6 @@ class PickingHelper(object):
         picker.Pick(self.click_position[0], self.click_position[1], 0, self.renderer)
         return picker.GetPickPosition()
 
-
     def pick_mouse_position(self):
         """Get corresponding mouse location in the 3D plot."""
         if self.mouse_position is None:
@@ -544,7 +551,6 @@ class PickingHelper(object):
         picker = vtk.vtkWorldPointPicker()
         picker.Pick(self.mouse_position[0], self.mouse_position[1], 0, self.renderer)
         return picker.GetPickPosition()
-
 
     def fly_to_mouse_position(self, focus=False):
         """Focus on last stored mouse position."""
@@ -556,7 +562,6 @@ class PickingHelper(object):
         else:
             self.fly_to(click_point)
 
-
     def enable_fly_to_right_click(self, callback=None):
         """Set the camera to track right click positions.
 
@@ -565,6 +570,7 @@ class PickingHelper(object):
         3D space.
 
         """
+
         def _the_callback(*args):
             click_point = self.pick_mouse_position()
             self.fly_to(click_point)

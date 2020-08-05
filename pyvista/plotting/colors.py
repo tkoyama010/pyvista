@@ -168,7 +168,7 @@ hexcolors = {
     'blanchedalmond':       '#FFEBCD',
     'blue':                 '#0000FF',
     'blueviolet':           '#8A2BE2',
-    'brown':                '#A52A2A',
+    'brown':                '#654321',
     'burlywood':            '#DEB887',
     'cadetblue':            '#5F9EA0',
     'chartreuse':           '#7FFF00',
@@ -375,7 +375,7 @@ def get_cmap_safe(cmap):
     try:
         from matplotlib.cm import get_cmap
     except ImportError:
-        raise Exception('cmap requires matplotlib')
+        raise ImportError('cmap requires matplotlib')
     if isinstance(cmap, str):
         # Try colorcet first
         try:

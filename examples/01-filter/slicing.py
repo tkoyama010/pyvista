@@ -101,6 +101,75 @@ slc
 ###############################################################################
 
 p = pv.Plotter()
-p.add_mesh(slc)
+p.add_mesh(slc, cmap=cmap)
 p.add_mesh(model.outline())
 p.show(cpos=[1, -1, 1])
+
+
+###############################################################################
+# Multiple Slices in Vector Direction
+# +++++++++++++++++++++++++++++++++++
+#
+# Slice a mesh perpendicularly along a vector direction perpendicularly.
+
+mesh = examples.download_brain()
+
+# Create vector
+vec = np.random.rand(3)
+# Normalize the vector
+normal = vec / np.linalg.norm(vec)
+
+# Make points along that vector for the extent of your slices
+a = mesh.center + normal * mesh.length / 3.0
+b = mesh.center - normal * mesh.length / 3.0
+
+# Define the line/points for the slices
+n_slices = 5
+line = pv.Line(a, b, n_slices)
+
+# Generate all of the slices
+slices = pv.MultiBlock()
+for point in line.points:
+    slices.append(mesh.slice(normal=normal, origin=point))
+
+###############################################################################
+
+p = pv.Plotter()
+p.add_mesh(mesh.outline(), color="k")
+p.add_mesh(slices, opacity=0.75)
+p.add_mesh(line, color="red", line_width=5)
+p.show()
+
+
+
+###############################################################################
+# Slice At Different Bearings
+# +++++++++++++++++++++++++++
+#
+# From `pyvista-support#23 <https://github.com/pyvista/pyvista-support/issues/23>`_
+#
+# An example of how to get many slices at different bearings all centered
+# around a user-chosen location.
+#
+# Create a point to orient slices around
+ranges = np.array(model.bounds).reshape(-1, 2).ptp(axis=1)
+point = np.array(model.center) - ranges*0.25
+
+###############################################################################
+# Now generate a few normal vectors to rotate a slice around the z-axis.
+# Use equation for circle since its about the Z-axis.
+increment = np.pi/6.
+# use a container to hold all the slices
+slices = pv.MultiBlock() # treat like a dictionary/list
+for theta in np.arange(0, np.pi, increment):
+    normal = np.array([np.cos(theta), np.sin(theta), 0.0]).dot(np.pi/2.)
+    name = 'Bearing: {:.2f}'.format(np.rad2deg(theta))
+    slices[name] = model.slice(origin=point, normal=normal)
+slices
+
+###############################################################################
+# And now display it!
+p = pv.Plotter()
+p.add_mesh(slices, cmap=cmap)
+p.add_mesh(model.outline())
+p.show()

@@ -17,8 +17,7 @@ import numpy as np
 import vtk
 
 import pyvista
-from pyvista.utilities import assert_empty_kwargs
-
+from pyvista.utilities import assert_empty_kwargs, check_valid_vector
 
 NORMALS = {
     'x': [1, 0, 0],
@@ -90,7 +89,6 @@ def Cylinder(center=(0.,0.,0.), direction=(1.,0.,0.), radius=0.5, height=1.0,
     >>> import numpy as np
     >>> cylinder = pyvista.Cylinder(np.array([1, 2, 3]), np.array([1, 1, 1]), 1, 1)
     >>> cylinder.plot() # doctest:+SKIP
-
     """
     capping = kwargs.pop('cap_ends', capping)
     assert_empty_kwargs(**kwargs)
@@ -146,14 +144,10 @@ def CylinderStructured(radius=0.5, height=1.0,
     X = radius_matrix * np.cos(theta_matrix)
     Y = radius_matrix * np.sin(theta_matrix)
 
-    # Duplicate the first point to close loop
-    X = np.append(X, X[0])
-    Y = np.append(Y, Y[0])
-
     # Make all the nodes in the grid
     xx = np.array([X] * z_resolution).ravel()
     yy = np.array([Y] * z_resolution).ravel()
-    dz = height / z_resolution
+    dz = height / (z_resolution - 1)
     zz = np.empty(yy.size)
     zz = np.full((X.size, z_resolution), dz)
     zz *= np.arange(z_resolution)
@@ -162,7 +156,7 @@ def CylinderStructured(radius=0.5, height=1.0,
     # Create the grid
     grid = pyvista.StructuredGrid()
     grid.points = np.c_[xx, yy, zz]
-    grid.dimensions = [nr, theta_resolution+1, z_resolution]
+    grid.dimensions = [nr, theta_resolution, z_resolution]
 
     # Orient properly in user direction
     vx = np.array([0., 0., 1.])
@@ -182,7 +176,8 @@ def CylinderStructured(radius=0.5, height=1.0,
 
 
 def Arrow(start=(0.,0.,0.), direction=(1.,0.,0.), tip_length=0.25,
-          tip_radius=0.1, shaft_radius=0.05, shaft_resolution=20):
+          tip_radius=0.1, tip_resolution=20, shaft_radius=0.05,
+          shaft_resolution=20, scale=None):
     """Create a vtk Arrow.
 
     Parameters
@@ -199,11 +194,18 @@ def Arrow(start=(0.,0.,0.), direction=(1.,0.,0.), tip_length=0.25,
     tip_radius : float, optional
         Radius of the tip.
 
+    tip_resolution : int, optional
+        Number of faces around the tip.
+
     shaft_radius : float, optional
         Radius of the shaft.
 
     shaft_resolution : int, optional
-        Number of faces around the shaft
+        Number of faces around the shaft.
+
+    scale : float or str, optional
+        Scale factor of the entire object, default is None (i.e. scale of 1).
+        'auto' scales to length of direction array.
 
     Return
     ------
@@ -215,10 +217,19 @@ def Arrow(start=(0.,0.,0.), direction=(1.,0.,0.), tip_length=0.25,
     arrow = vtk.vtkArrowSource()
     arrow.SetTipLength(tip_length)
     arrow.SetTipRadius(tip_radius)
+    arrow.SetTipResolution(tip_resolution)
     arrow.SetShaftRadius(shaft_radius)
     arrow.SetShaftResolution(shaft_resolution)
     arrow.Update()
     surf = pyvista.PolyData(arrow.GetOutput())
+
+    if scale == 'auto':
+        scale = float(np.linalg.norm(direction))
+    if isinstance(scale, float) or isinstance(scale, int):
+        surf.points *= scale
+    elif scale is not None:
+        raise TypeError("Scale must be either float, int or 'auto'.")
+
     translate(surf, start, direction)
     return surf
 
@@ -295,7 +306,7 @@ def Plane(center=(0, 0, 0), direction=(0, 0, 1), i_size=1, j_size=1,
         Size of the plane in the i direction.
 
     j_size : float
-        Size of the plane in the i direction.
+        Size of the plane in the j direction.
 
     i_resolution : int
         Number of points on the plane in the i direction.
@@ -338,6 +349,8 @@ def Line(pointa=(-0.5, 0., 0.), pointb=(0.5, 0., 0.), resolution=1):
         number of pieces to divide line into
 
     """
+    if resolution <= 0:
+        raise ValueError('Resolution must be positive')
     if np.array(pointa).size != 3:
         raise TypeError('Point A must be a length three tuple of floats.')
     if np.array(pointb).size != 3:
@@ -443,7 +456,7 @@ def Cone(center=(0.,0.,0.), direction=(1.,0.,0.), height=1.0, radius=None,
     src.SetHeight(height)
     # Contributed by @kjelljorner in #249:
     if angle and radius:
-        raise Exception("Both radius and angle specified. They are mutually exclusive.")
+        raise ValueError("Both radius and angle specified. They are mutually exclusive.")
     elif angle and not radius:
         src.SetAngle(angle)
     elif not angle and radius:
@@ -547,7 +560,7 @@ def SuperToroid(*args, **kwargs):
     DEPRECATED: Please use `pyvista.ParametricSuperToroid` instead.
 
     """
-    raise RuntimeError('use `pyvista.ParametricSuperToroid` instead')
+    raise NotImplementedError('use `pyvista.ParametricSuperToroid` instead')
 
 
 def Ellipsoid(*args, **kwargs):
@@ -556,7 +569,7 @@ def Ellipsoid(*args, **kwargs):
     DEPRECATED: Please use :func:`pyvista.ParametricEllipsoid` instead.
 
     """
-    raise RuntimeError('use `pyvista.ParametricEllipsoid` instead')
+    raise NotImplementedError('use `pyvista.ParametricEllipsoid` instead')
 
 
 def Wavelet(extent=(-10,10,-10,10,-10,10), center=(0,0,0), maximum=255,
@@ -577,3 +590,101 @@ def Wavelet(extent=(-10,10,-10,10,-10,10), center=(0,0,0), maximum=255,
     wavelet_source.SetSubsampleRate(subsample_rate)
     wavelet_source.Update()
     return pyvista.wrap(wavelet_source.GetOutput())
+
+
+def CircularArc(pointa, pointb, center, resolution=100, normal=None,
+                polar=None, angle=None, negative=False):
+    """Create a circular arc defined by two endpoints and a center.
+
+    The number of segments composing the polyline is controlled by
+    setting the object resolution.  Alternatively, one can use a
+    better API (that does not allow for inconsistent nor ambiguous
+    inputs), using a starting point (polar vector, measured from the
+    arc's center), a normal to the plane of the arc, and an angle
+    defining the arc length.
+
+    Parameters
+    ----------
+    pointa : np.ndarray or list
+        Position of the first end point.
+
+    pointb : np.ndarray or list
+        Position of the other end point.
+
+    center : np.ndarray or list
+        Center of the circle that defines the arc.
+
+    resolution : int, optional
+        The number of segments of the polyline that draws the arc.
+        Resolution of 1 will just create a line.
+
+    normal : np.ndarray or list
+        The normal vector to the plane of the arc.  By default it
+        points in the positive Z direction.
+
+    polar : np.ndarray or list
+        (starting point of the arc).  By default it is the unit vector
+        in the positive x direction. Note: This is only used when
+        normal has been input.
+
+    angle : float
+        Arc length (in degrees), beginning at the polar vector.  The
+        direction is counterclockwise by default; a negative value
+        draws the arc in the clockwise direction.  Note: This is only
+        used when normal has been input.
+
+    negative : bool, optional
+        By default the arc spans the shortest angular sector point1 and point2.
+
+        By setting this to true, the longest angular sector is used
+        instead (i.e. the negative coterminal angle to the shortest
+        one). This is only used when normal has not been input
+
+    Examples
+    --------
+    Quarter arc centered at the origin in the xy plane
+
+    >>> import pyvista
+    >>> arc = pyvista.CircularArc([-1, 0, 0], [0, 1, 0], [0, 0, 0])
+    >>> pl = pyvista.Plotter()
+    >>> _ = pl.add_mesh(arc, color='k', line_width=4)
+    >>> _ = pl.show_bounds(location='all')
+    >>> _ = pl.view_xy()
+    >>> pl.show() # doctest:+SKIP
+
+    Quarter arc centered at the origin in the xz plane
+
+    >>> arc = pyvista.CircularArc([-1, 0, 0], [1, 0, 0], [0, 0, 0], normal=[0, 0, 1])
+    >>> arc.plot() # doctest:+SKIP
+    """
+    check_valid_vector(pointa, 'pointa')
+    check_valid_vector(pointb, 'pointb')
+    check_valid_vector(center, 'center')
+
+    # fix half-arc bug: if a half arc travels directly through the
+    # center point, it becomes a line
+    pointb = list(pointb)
+    pointb[0] -= 1E-10
+    pointb[1] -= 1E-10
+
+    arc = vtk.vtkArcSource()
+    arc.SetPoint1(*pointa)
+    arc.SetPoint2(*pointb)
+    arc.SetCenter(*center)
+    arc.SetResolution(resolution)
+    arc.SetNegative(negative)
+
+    if normal is not None:
+        arc.UseNormalAndAngleOn()
+        check_valid_vector(normal, 'normal')
+        arc.SetNormal(*normal)
+
+        if polar is not None:
+            check_valid_vector(polar, 'polar')
+            arc.SetPolarVector(*polar)
+
+        if angle is not None:
+            arc.SetAngle(angle)
+
+    arc.Update()
+    return pyvista.wrap(arc.GetOutput())

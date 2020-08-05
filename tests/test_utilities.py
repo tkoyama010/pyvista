@@ -1,14 +1,16 @@
 """ test pyvista.utilities """
+import pathlib
 import os
 
 import numpy as np
 import pytest
+import vtk
 
 import pyvista
 from pyvista import examples as ex
-from pyvista.utilities import helpers
-from pyvista.utilities import fileio
 from pyvista.utilities import errors
+from pyvista.utilities import fileio
+from pyvista.utilities import helpers
 
 # Only set this here just the once.
 pyvista.set_error_output_file(os.path.join(os.path.dirname(__file__), 'ERROR_OUTPUT.txt'))
@@ -17,7 +19,7 @@ pyvista.set_error_output_file(os.path.join(os.path.dirname(__file__), 'ERROR_OUT
 def test_createvectorpolydata_error():
     orig = np.random.random((3, 1))
     vec = np.random.random((3, 1))
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         helpers.vector_poly_data(orig, vec)
 
 
@@ -37,9 +39,12 @@ def test_createvectorpolydata():
     assert np.any(vdata.point_arrays['vectors'])
 
 
-def test_read(tmpdir):
+@pytest.mark.parametrize('use_pathlib', [True, False])
+def test_read(tmpdir, use_pathlib):
     fnames = (ex.antfile, ex.planefile, ex.hexbeamfile, ex.spherefile,
               ex.uniformfile, ex.rectfile)
+    if use_pathlib:
+        fnames = [pathlib.Path(fname) for fname in fnames]
     types = (pyvista.PolyData, pyvista.PolyData, pyvista.UnstructuredGrid,
              pyvista.PolyData, pyvista.UniformGrid, pyvista.RectilinearGrid)
     for i, filename in enumerate(fnames):
@@ -93,8 +98,6 @@ def test_get_array():
     assert np.allclose(farr, helpers.get_array(grid, 'field_data', preference='field'))
 
 
-
-
 def test_is_inside_bounds():
     data = ex.load_uniform()
     bnds = data.bounds
@@ -118,7 +121,9 @@ def test_voxelize():
 
 
 def test_report():
-    report = pyvista.Report()
+    report = pyvista.Report(gpu=True)
+    assert report is not None
+    report = pyvista.Report(gpu=False)
     assert report is not None
 
 
@@ -128,8 +133,8 @@ def test_line_segments_from_points():
     assert poly.n_cells == 2
     assert poly.n_points == 4
     cells = poly.lines
-    assert np.allclose(cells[0], [2, 0,1])
-    assert np.allclose(cells[1], [2, 2,3])
+    assert np.allclose(cells[:3], [2, 0, 1])
+    assert np.allclose(cells[3:], [2, 2, 3])
 
 
 def test_lines_from_points():
@@ -138,8 +143,8 @@ def test_lines_from_points():
     assert poly.n_cells == 2
     assert poly.n_points == 3
     cells = poly.lines
-    assert np.allclose(cells[0], [2, 0,1])
-    assert np.allclose(cells[1], [2, 1,2])
+    assert np.allclose(cells[:3], [2, 0, 1])
+    assert np.allclose(cells[3:], [2, 1, 2])
 
 
 def test_grid_from_sph_coords():
@@ -180,6 +185,7 @@ def test_transform_vectors_sph_to_cart():
         [67.80403533828323, 360.8359915416445, -70000.0],
     )
 
+
 def test_assert_empty_kwargs():
     kwargs = {}
     assert errors.assert_empty_kwargs(**kwargs)
@@ -189,3 +195,19 @@ def test_assert_empty_kwargs():
     with pytest.raises(TypeError):
         kwargs = {"foo":6, "goo":"bad"}
         errors.assert_empty_kwargs(**kwargs)
+
+
+def test_convert_id_list():
+    ids = np.array([4, 5, 8])
+    id_list = vtk.vtkIdList()
+    id_list.SetNumberOfIds(len(ids))
+    for i, v in enumerate(ids):
+        id_list.SetId(i, v)
+    converted = helpers.vtk_id_list_to_array(id_list)
+    assert np.allclose(converted, ids)
+
+
+def test_progress_monitor():
+    mesh = pyvista.Sphere()
+    ugrid = mesh.delaunay_3d(progress_bar=True)
+    assert isinstance(ugrid, pyvista.UnstructuredGrid)

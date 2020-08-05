@@ -45,6 +45,18 @@ curvsurf.texture_map_to_plane(inplace=True)
 
 curvsurf.plot(texture=tex)
 
+###############################################################################
+# Display scalar data along with a texture by ensuring the
+# ``interpolate_before_map`` setting is ``False`` and specifying both the
+# ``texture`` and ``scalars`` arguments.
+
+elevated = curvsurf.elevation()
+
+elevated.plot(scalars='Elevation',
+              cmap='terrain',
+              texture=tex,
+              interpolate_before_map=False)
+
 
 ###############################################################################
 # Note that this process can be completed with any image texture!
@@ -95,6 +107,25 @@ tex = pv.numpy_to_texture(image)
 # Render it!
 curvsurf.plot(texture=tex)
 
+###############################################################################
+# Textures with Transparency
+# ++++++++++++++++++++++++++
+#
+# Textures can also specify per-pixel opacity values. The image must
+# contain a 4th channel specifying the opacity value from 0 [transparent] to
+# 255 [fully visible]. To enable this feature just pass the opacity array as the
+# 4th channel of the image as a 3 dimensional matrix with shape [nrows, ncols, 4]
+# :func:`pyvista.numpy_to_texture`.
+#
+# Here we can download an image that has an alpha channel:
+rgba = examples.download_rgba_texture()
+rgba.n_components
+
+###############################################################################
+
+# Render it!
+curvsurf.plot(texture=rgba, show_grid=True)
+
 
 ###############################################################################
 # Repeating Textures
@@ -128,4 +159,4 @@ curvsurf.t_coords = puppy_coords
 
 # use the puppy image
 tex = examples.download_puppy_texture()
-curvsurf.plot(texture=tex, cpos="yx")
+curvsurf.plot(texture=tex, cpos="xy")

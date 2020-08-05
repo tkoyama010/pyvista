@@ -134,7 +134,7 @@ to each PyVista data object:
 
 
 You can also create the plotter to highly control the scene. First, instantiate
-a plotter such as :class:`pyvista.Plotter` or :class:`pyvista.BackgroundPlotter`:
+a plotter such as :class:`pyvista.Plotter` or :class:`pyvistaqt.BackgroundPlotter`:
 
 The :class:`pyvista.Plotter` will create a rendering window that will pause the
 execution of the code after calling ``show``.
@@ -164,4 +164,37 @@ manually interact with the plotting window:
 Be sure to check out all the available plotters for your use case:
 
 * :class:`pyvista.Plotter`: The standard plotter that pauses the code until closed
-* :class:`pyvista.BackgroundPlotter`: Creates a rendering window that is interactive and does not pause the code execution
+* :class:`pyvistaqt.BackgroundPlotter`: Creates a rendering window that is interactive and does not pause the code execution (for more information see the `pyvistaqt`_ package)
+
+.. _pyvistaqt: http://qtdocs.pyvista.org/
+
+
+
+Exporting
+~~~~~~~~~
+
+Any PyVista mesh object can be saved to a VTK file format using the ``.save()``
+method bound directly on those objects. For example, the mesh used above could
+be saved like:
+
+.. code-block:: python
+
+    mesh.save("mesh.vtk")
+
+Or since that mesh is :class:`pyvista.PolyData`, we could use the ``.vtp``,
+``.stl``, or ``.ply`` formats as well.
+For more details on which formats are supported in the ``.save()`` method,
+please refer to the docs for that method on each mesh type.
+
+Also note that we can export any PyVista mesh to any file format supported by
+`meshio <https://github.com/nschloe/meshio>`_. Meshio supports many formats
+including: Abaqus, ANSYS msh, AVS-UCD, CGNS, DOLFIN XML, Exodus, FLAC3D, H5M,
+Kratos/MDPA, Medit, MED/Salome, Gmsh (versions 2 and 4), OBJ, OFF, PERMAS,
+PLY, STL, TetGen .node/.ele, SVG (2D only, output only), UGRID, WKT (TIN),
+XDMF, and more!
+
+To save a PyVista mesh using ``meshio``, use :func:`pyvista.save_meshio`:
+
+.. code-block:: python
+
+    pv.save_meshio("mesh.obj", mesh)

@@ -11,22 +11,35 @@ import pyvista
 
 # Helpers:
 
+def _check_examples_path():
+    """Check if the examples path exists."""
+    if pyvista.EXAMPLES_PATH is None:
+        raise FileNotFoundError('EXAMPLES_PATH does not exist.  Try setting the '
+                                'environment variable `PYVISTA_USERDATA_PATH` '
+                                'to a writable path and restarting python')
+
+
 def delete_downloads():
     """Delete all downloaded examples to free space or update the files."""
+    _check_examples_path()
     shutil.rmtree(pyvista.EXAMPLES_PATH)
     os.makedirs(pyvista.EXAMPLES_PATH)
     return True
 
 
 def _decompress(filename):
+    _check_examples_path()
     zip_ref = zipfile.ZipFile(filename, 'r')
     zip_ref.extractall(pyvista.EXAMPLES_PATH)
     return zip_ref.close()
 
+
 def _get_vtk_file_url(filename):
     return 'https://github.com/pyvista/vtk-data/raw/master/Data/{}'.format(filename)
 
+
 def _retrieve_file(url, filename):
+    _check_examples_path()
     # First check if file has already been downloaded
     local_path = os.path.join(pyvista.EXAMPLES_PATH, os.path.basename(filename))
     local_path_no_zip = local_path.replace('.zip', '')
@@ -582,3 +595,51 @@ def download_crater_imagery():
 def download_dolfin():
     """Download crater texture."""
     return _download_and_read('dolfin_fine.xml', file_format="dolfin-xml")
+
+
+def download_damavand_volcano():
+    """Download damavand volcano model."""
+    volume = _download_and_read("damavand-volcano.vtk")
+    volume.rename_array("None", "data")
+    return volume
+
+
+def download_delaunay_example():
+    """Download a pointset for the Delaunay example."""
+    return _download_and_read('250.vtk')
+
+
+def download_embryo():
+    """Download a volume of an embryo."""
+    return _download_and_read('embryo.slc')
+
+
+def download_antarctica_velocity():
+    """Download the antarctica velocity simulation results."""
+    return _download_and_read("antarctica_velocity.vtp")
+
+
+def download_room_surface_mesh():
+    """Download the room surface mesh.
+
+    This mesh is for demonstrating the difference that depth peeling can
+    provide whenn rendering translucent geometries.
+
+    This mesh is courtesy of `Sam Potter <https://github.com/sampotter>`_.
+    """
+    return _download_and_read("room_surface_mesh.obj")
+
+
+def download_beach():
+    """Download the beach NRRD image."""
+    return _download_and_read("beach.nrrd")
+
+
+def download_rgba_texture():
+    """Download a texture with an alpha channel."""
+    return _download_and_read("alphachannel.png", texture=True)
+
+
+def download_vtk_logo():
+    """Download a texture of the VTK logo."""
+    return _download_and_read("vtk.png", texture=True)

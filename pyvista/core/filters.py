@@ -1,6 +1,6 @@
 """These classes hold methods to apply general filters to any data type.
 
-By inherritting these classes into the wrapped VTK data structures, a user
+By inheriting these classes into the wrapped VTK data structures, a user
 can easily apply common filters in an intuitive manner.
 
 Example
@@ -22,17 +22,29 @@ Example
 >>> iso = dataset.contour()
 
 """
-import collections
+import collections.abc
 import logging
+from functools import wraps
 
 import numpy as np
 import vtk
-from vtk.util.numpy_support import (numpy_to_vtkIdTypeArray, vtk_to_numpy)
+from vtk.util.numpy_support import vtk_to_numpy
 
 import pyvista
-from pyvista.utilities import (CELL_DATA_FIELD, POINT_DATA_FIELD, NORMALS,
-                               assert_empty_kwargs, generate_plane, get_array,
-                               wrap)
+from pyvista.utilities import (FieldAssociation, NORMALS, assert_empty_kwargs,
+                               generate_plane, get_array, vtk_id_list_to_array,
+                               wrap, ProgressMonitor, abstract_class)
+from pyvista.utilities.cells import numpy_to_idarr
+from pyvista.core.errors import NotAllTrianglesError
+
+
+def _update_alg(alg, progress_bar=False, message=''):
+    """Update an algorithm with or without a progress bar."""
+    if progress_bar:
+        with ProgressMonitor(alg, message=message):
+            alg.Update()
+    else:
+        alg.Update()
 
 
 def _get_output(algorithm, iport=0, iconnection=0, oport=0, active_scalars=None,
@@ -47,16 +59,9 @@ def _get_output(algorithm, iport=0, iconnection=0, oport=0, active_scalars=None,
     return data
 
 
-
-class DataSetFilters(object):
+@abstract_class
+class DataSetFilters:
     """A set of common filters that can be applied to any vtkDataSet."""
-
-    def __new__(cls, *args, **kwargs):
-        """Allocate memory for the dataset filters."""
-        if cls is DataSetFilters:
-            raise TypeError("pyvista.DataSetFilters is an abstract class and may not be instantiated.")
-        return object.__new__(cls)
-
 
     def _clip_with_function(dataset, function, invert=True, value=0.0):
         """Clip using an implicit function (internal helper)."""
@@ -74,7 +79,6 @@ class DataSetFilters(object):
         alg.Update() # Perform the Cut
         return _get_output(alg)
 
-
     def clip(dataset, normal='x', origin=None, invert=True, value=0.0, inplace=False):
         """Clip a dataset by a plane by specifying the origin and normal.
 
@@ -87,16 +91,15 @@ class DataSetFilters(object):
             specified as a string conventional direction such as ``'x'`` for
             ``(1,0,0)`` or ``'-x'`` for ``(-1,0,0)``, etc.
 
-        origin : tuple(float)
+        origin : tuple(float), optional
             The center ``(x,y,z)`` coordinate of the plane on which the clip
-            occurs
+            occurs. The default is the center of the dataset.
 
-        invert : bool
-            Flag on whether to flip/invert the clip
+        invert : bool, optional
+            Flag on whether to flip/invert the clip.
 
-        value : float:
-            Set the clipping value of the implicit function (if clipping with
-            implicit function) or scalar value (if clipping with scalars).
+        value : float, optional
+            Set the clipping value along the normal direction.
             The default value is 0.0.
 
         inplace : bool, optional
@@ -118,7 +121,6 @@ class DataSetFilters(object):
         else:
             return result
 
-
     def clip_box(dataset, bounds=None, invert=True, factor=0.35):
         """Clip a dataset by a bounding box defined by the bounds.
 
@@ -127,10 +129,10 @@ class DataSetFilters(object):
         Parameters
         ----------
         bounds : tuple(float)
-            Length 6 iterable of floats: (xmin, xmax, ymin, ymax, zmin, zmax).
-            Length 3 iterable of floats: distances from the min coordinate of
+            Length 6 sequence of floats: (xmin, xmax, ymin, ymax, zmin, zmax).
+            Length 3 sequence of floats: distances from the min coordinate of
             of the input mesh. Single float value: uniform distance from the
-            min coordinate. Length 12 iterable of length 3 iterable of floats:
+            min coordinate. Length 12 sequence of length 3 sequence of floats:
             a plane collection (normal, center, ...).
             :class:`pyvista.PolyData`: if a poly mesh is passed that represents
             a box with 6 faces that all form a standard box, then planes will
@@ -158,7 +160,7 @@ class DataSetFilters(object):
         elif isinstance(bounds, pyvista.PolyData):
             poly = bounds
             if poly.n_cells != 6:
-                raise RuntimeError("The bounds mesh must have only 6 faces.")
+                raise ValueError("The bounds mesh must have only 6 faces.")
             bounds = []
             poly.compute_normals()
             for cid in range(6):
@@ -166,11 +168,13 @@ class DataSetFilters(object):
                 normal = cell["Normals"][0]
                 bounds.append(normal)
                 bounds.append(cell.center)
+        if not isinstance(bounds, (np.ndarray, collections.abc.Sequence)):
+            raise TypeError('Bounds must be a sequence of floats with length 3, 6 or 12.')
+        if len(bounds) not in [3, 6, 12]:
+            raise ValueError('Bounds must be a sequence of floats with length 3, 6 or 12.')
         if len(bounds) == 3:
             xmin, xmax, ymin, ymax, zmin, zmax = dataset.bounds
             bounds = (xmin,xmin+bounds[0], ymin,ymin+bounds[1], zmin,zmin+bounds[2])
-        if not isinstance(bounds, collections.Iterable) or not (len(bounds) == 6 or len(bounds) == 12):
-            raise AssertionError('Bounds must be a length 6 iterable of floats.')
         alg = vtk.vtkBoxClipDataSet()
         alg.SetInputDataObject(dataset)
         alg.SetBoxClip(*bounds)
@@ -182,6 +186,34 @@ class DataSetFilters(object):
         alg.Update()
         return _get_output(alg, oport=port)
 
+    def compute_implicit_distance(dataset, surface, inplace=False):
+        """Compute the implicit distance from the points to a surface.
+
+        This filter will comput the implicit distance from all of the nodes of
+        this mesh to a given surface. This distance will be added as a point
+        array called ``'implicit_distance'``.
+
+        Parameters
+        ----------
+        surface : pyvista.Common
+            The surface used to compute the distance
+
+        inplace : bool
+            If True, a new scalar array will be added to the ``point_arrays``
+            of this mesh. Otherwise a copy of this mesh is returned with that
+            scalar field.
+        """
+        function = vtk.vtkImplicitPolyDataDistance()
+        function.SetInput(surface)
+        points = pyvista.convert_array(dataset.points)
+        dists = vtk.vtkDoubleArray()
+        function.FunctionValue(points, dists)
+        if inplace:
+            dataset.point_arrays['implicit_distance'] = pyvista.convert_array(dists)
+            return
+        result = dataset.copy()
+        result.point_arrays['implicit_distance'] = pyvista.convert_array(dists)
+        return result
 
     def clip_surface(dataset, surface, invert=True, value=0.0,
                      compute_distance=False):
@@ -225,7 +257,6 @@ class DataSetFilters(object):
                                                     invert=invert, value=value)
         return result
 
-
     def slice(dataset, normal='x', origin=None, generate_triangles=False,
               contour=False):
         """Slice a dataset by a plane at the specified origin and normal vector orientation.
@@ -268,7 +299,6 @@ class DataSetFilters(object):
         if contour:
             return output.contour()
         return output
-
 
     def slice_orthogonal(dataset, x=None, y=None, z=None,
                          generate_triangles=False, contour=False):
@@ -314,7 +344,6 @@ class DataSetFilters(object):
         output[2, 'XY'] = dataset.slice(normal='z', origin=[x,y,z], generate_triangles=generate_triangles)
         return output
 
-
     def slice_along_axis(dataset, n=5, axis='x', tolerance=None,
                          generate_triangles=False, contour=False,
                          bounds=None, center=None):
@@ -331,7 +360,7 @@ class DataSetFilters(object):
             (``0``, ``1``, or ``2``).
 
         tolerance : float, optional
-            The toleranceerance to the edge of the dataset bounds to create the slices
+            The tolerance to the edge of the dataset bounds to create the slices
 
         generate_triangles: bool, optional
             If this is enabled (``False`` by default), the output will be
@@ -349,7 +378,7 @@ class DataSetFilters(object):
             try:
                 ax = axes[axis]
             except KeyError:
-                raise RuntimeError('Axis ({}) not understood'.format(axis))
+                raise ValueError('Axis ({}) not understood'.format(axis))
         # get the locations along that axis
         if bounds is None:
             bounds = dataset.bounds
@@ -375,7 +404,6 @@ class DataSetFilters(object):
             output[i, 'slice%.2d' % i] = slc
         return output
 
-
     def slice_along_line(dataset, line, generate_triangles=False,
                          contour=False):
         """Slice a dataset using a polyline/spline as the path.
@@ -397,7 +425,7 @@ class DataSetFilters(object):
         """
         # check that we have a PolyLine cell in the input line
         if line.GetNumberOfCells() != 1:
-            raise AssertionError('Input line must have only one cell.')
+            raise ValueError('Input line must have only one cell.')
         polyline = line.GetCell(0)
         if not isinstance(polyline, vtk.vtkPolyLine):
             raise TypeError('Input line must have a PolyLine cell, not ({})'.format(type(polyline)))
@@ -416,9 +444,8 @@ class DataSetFilters(object):
             return output.contour()
         return output
 
-
     def threshold(dataset, value=None, scalars=None, invert=False, continuous=False,
-                  preference='cell'):
+                  preference='cell', all_scalars=True):
         """Apply a ``vtkThreshold`` filter to the input dataset.
 
         This filter will apply a ``vtkThreshold`` filter to the input dataset
@@ -428,9 +455,9 @@ class DataSetFilters(object):
 
         Parameters
         ----------
-        value : float or iterable, optional
+        value : float or sequence, optional
             Single value or (min, max) to be used for the data threshold.  If
-            iterable, then length must be 2. If no value is specified, the
+            a sequence, then length must be 2. If no value is specified, the
             non-NaN data range will be used to remove any NaN values.
 
         scalars : str, optional
@@ -444,13 +471,28 @@ class DataSetFilters(object):
 
         continuous : bool, optional
             When True, the continuous interval [minimum cell scalar,
-            maxmimum cell scalar] will be used to intersect the threshold bound,
+            maximum cell scalar] will be used to intersect the threshold bound,
             rather than the set of discrete scalar values from the vertices.
 
         preference : str, optional
             When scalars is specified, this is the preferred array type to
             search for in the dataset.  Must be either ``'point'`` or ``'cell'``
 
+        all_scalars : bool, optional
+            If using scalars from point data, all scalars for all
+            points in a cell must satisfy the threshold when this
+            value is ``True``.  When ``False``, any point of the cell
+            with a scalar value satisfying the threshold criterion
+            will extract the cell.
+
+        Examples
+        --------
+        >>> import pyvista
+        >>> import numpy as np
+        >>> volume = np.zeros([10, 10, 10])
+        >>> volume[:3] = 1
+        >>> v = pyvista.wrap(volume)
+        >>> threshed = v.threshold(0.1)
         """
         # set the scalaras to threshold on
         if scalars is None:
@@ -458,10 +500,10 @@ class DataSetFilters(object):
         arr, field = get_array(dataset, scalars, preference=preference, info=True)
 
         if arr is None:
-            raise AssertionError('No arrays present to threshold.')
+            raise ValueError('No arrays present to threshold.')
 
         # If using an inverted range, merge the result of two filters:
-        if isinstance(value, collections.Iterable) and invert:
+        if isinstance(value, (np.ndarray, collections.abc.Sequence)) and invert:
             valid_range = [np.nanmin(arr), np.nanmax(arr)]
             # Create two thresholds
             t1 = dataset.threshold([valid_range[0], value[0]], scalars=scalars,
@@ -477,18 +519,21 @@ class DataSetFilters(object):
 
         # Run a standard threshold algorithm
         alg = vtk.vtkThreshold()
+        alg.SetAllScalars(all_scalars)
         alg.SetInputDataObject(dataset)
-        alg.SetInputArrayToProcess(0, 0, 0, field, scalars) # args: (idx, port, connection, field, name)
+        alg.SetInputArrayToProcess(0, 0, 0, field.value, scalars) # args: (idx, port, connection, field, name)
         # set thresholding parameters
         alg.SetUseContinuousCellRange(continuous)
         # use valid range if no value given
         if value is None:
             value = dataset.get_data_range(scalars)
-        # check if value is iterable (if so threshold by min max range like ParaView)
-        if isinstance(value, collections.Iterable):
+        # check if value is a sequence (if so threshold by min max range like ParaView)
+        if isinstance(value, (np.ndarray, collections.abc.Sequence)):
             if len(value) != 2:
-                raise AssertionError('Value range must be length one for a float value or two for min/max; not ({}).'.format(value))
+                raise ValueError('Value range must be length one for a float value or two for min/max; not ({}).'.format(value))
             alg.ThresholdBetween(value[0], value[1])
+        elif isinstance(value, collections.abc.Iterable):
+            raise TypeError('Value must either be a single scalar or a sequence.')
         else:
             # just a single value
             if invert:
@@ -498,7 +543,6 @@ class DataSetFilters(object):
         # Run the threshold
         alg.Update()
         return _get_output(alg)
-
 
     def threshold_percent(dataset, percent=0.50, scalars=None, invert=False,
                           continuous=False, preference='cell'):
@@ -540,9 +584,9 @@ class DataSetFilters(object):
             if percent >= 1:
                 percent = float(percent) / 100.0
                 if percent > 1:
-                    raise RuntimeError('Percentage ({}) is out of range (0, 1).'.format(percent))
+                    raise ValueError('Percentage ({}) is out of range (0, 1).'.format(percent))
             if percent < 1e-10:
-                raise RuntimeError('Percentage ({}) is too close to zero or negative.'.format(percent))
+                raise ValueError('Percentage ({}) is too close to zero or negative.'.format(percent))
             return percent
 
         def _get_val(percent, dmin, dmax):
@@ -551,9 +595,11 @@ class DataSetFilters(object):
             return dmin + float(percent) * (dmax - dmin)
 
         # Compute the values
-        if isinstance(percent, collections.Iterable):
+        if isinstance(percent, (np.ndarray, collections.abc.Sequence)):
             # Get two values
             value = [_get_val(percent[0], dmin, dmax), _get_val(percent[1], dmin, dmax)]
+        elif isinstance(percent, collections.abc.Iterable):
+            raise TypeError('Percent must either be a single scalar or a sequence.')
         else:
             # Compute one value to threshold
             value = _get_val(percent, dmin, dmax)
@@ -561,7 +607,6 @@ class DataSetFilters(object):
         return DataSetFilters.threshold(dataset, value=value, scalars=scalars,
                                         invert=invert, continuous=continuous,
                                         preference=preference)
-
 
     def outline(dataset, generate_faces=False):
         """Produce an outline of the full extent for the input dataset.
@@ -606,19 +651,34 @@ class DataSetFilters(object):
         alg.Update()
         return _get_output(alg)
 
-    def wireframe(dataset):
+    def extract_all_edges(dataset, progress_bar=False):
         """Extract all the internal/external edges of the dataset as PolyData.
 
         This produces a full wireframe representation of the input dataset.
 
+        Parameters
+        ----------
+        progress_bar : bool, optional
+            Display a progress bar to indicate progress.
+
         """
         alg = vtk.vtkExtractEdges()
         alg.SetInputDataObject(dataset)
-        alg.Update()
+        _update_alg(alg, progress_bar, 'Extracting All Edges')
         return _get_output(alg)
 
+    @wraps(extract_all_edges)
+    def wireframe(self, *args, **kwargs):  # pragma: no cover
+        """Wrap ``extract_all_edges``.
+
+        DEPRECATED: Please use ``extract_all_edges`` instead.
+
+        """
+        logging.warning("DEPRECATED: ``.wireframe`` is deprecated. Use ``.extract_all_edges`` instead.")
+        return self.extract_all_edges(*args, **kwargs)
+
     def elevation(dataset, low_point=None, high_point=None, scalar_range=None,
-                  preference='point', set_active=True):
+                  preference='point', set_active=True, progress_bar=False):
         """Generate scalar values on a dataset.
 
         The scalar values lie within a user specified range, and are generated by
@@ -654,6 +714,9 @@ class DataSetFilters(object):
             A boolean flag on whether or not to set the new `Elevation` scalar
             as the active scalars array on the output dataset.
 
+        progress_bar : bool, optional
+            Display a progress bar to indicate progress.
+
         Warning
         -------
         This will create a scalars array named `Elevation` on the point data of
@@ -672,11 +735,11 @@ class DataSetFilters(object):
             scalar_range = (low_point[2], high_point[2])
         elif isinstance(scalar_range, str):
             scalar_range = dataset.get_data_range(arr=scalar_range, preference=preference)
-        elif isinstance(scalar_range, collections.Iterable):
+        elif isinstance(scalar_range, (np.ndarray, collections.abc.Sequence)):
             if len(scalar_range) != 2:
-                raise AssertionError('scalar_range must have a length of two defining the min and max')
+                raise ValueError('scalar_range must have a length of two defining the min and max')
         else:
-            raise RuntimeError('scalar_range argument ({}) not understood.'.format(type(scalar_range)))
+            raise TypeError('scalar_range argument ({}) not understood.'.format(type(scalar_range)))
         # Construct the filter
         alg = vtk.vtkElevationFilter()
         alg.SetInputDataObject(dataset)
@@ -684,27 +747,26 @@ class DataSetFilters(object):
         alg.SetScalarRange(scalar_range)
         alg.SetLowPoint(low_point)
         alg.SetHighPoint(high_point)
-        alg.Update()
+        _update_alg(alg, progress_bar, 'Computing Elevation')
         # Decide on updating active scalars array
         name = 'Elevation' # Note that this is added to the PointData
         if not set_active:
             name = None
         return _get_output(alg, active_scalars=name, active_scalars_field='point')
 
-
     def contour(dataset, isosurfaces=10, scalars=None, compute_normals=False,
                 compute_gradients=False, compute_scalars=True, rng=None,
-                preference='point', method='contour'):
+                preference='point', method='contour', progress_bar=False):
         """Contour an input dataset by an array.
 
         ``isosurfaces`` can be an integer specifying the number of isosurfaces in
-        the data range or an iterable set of values for explicitly setting the isosurfaces.
+        the data range or a sequence of values for explicitly setting the isosurfaces.
 
         Parameters
         ----------
-        isosurfaces : int or iterable
-            Number of isosurfaces to compute across valid data range or an
-            iterable of float values to explicitly use as the isosurfaces.
+        isosurfaces : int or sequence
+            Number of isosurfaces to compute across valid data range or a
+            sequence of float values to explicitly use as the isosurfaces.
 
         scalars : str, optional
             Name of scalars to threshold on. Defaults to currently active scalars.
@@ -731,6 +793,9 @@ class DataSetFilters(object):
             Must be one of ``'contour'``, ``'marching_cubes'`` and
             ``'flying_edges'``. Defaults to ``'contour'``.
 
+        progress_bar : bool, optional
+            Display a progress bar to indicate progress.
+
         """
         if method is None or method == 'contour':
             alg = vtk.vtkContourFilter()
@@ -739,10 +804,10 @@ class DataSetFilters(object):
         elif method == 'flying_edges':
             alg = vtk.vtkFlyingEdges3D()
         else:
-            raise RuntimeError("Method '{}' is not supported".format(method))
+            raise ValueError("Method '{}' is not supported".format(method))
         # Make sure the input has scalars to contour on
         if dataset.n_arrays < 1:
-            raise AssertionError('Input dataset for the contour filter must have scalar data.')
+            raise ValueError('Input dataset for the contour filter must have scalar data.')
         alg.SetInputDataObject(dataset)
         alg.SetComputeNormals(compute_normals)
         alg.SetComputeGradients(compute_gradients)
@@ -753,24 +818,23 @@ class DataSetFilters(object):
         else:
             _, field = get_array(dataset, scalars, preference=preference, info=True)
         # NOTE: only point data is allowed? well cells works but seems buggy?
-        if field != pyvista.POINT_DATA_FIELD:
-            raise AssertionError('Contour filter only works on Point data. Array ({}) is in the Cell data.'.format(scalars))
-        alg.SetInputArrayToProcess(0, 0, 0, field, scalars) # args: (idx, port, connection, field, name)
+        if field != FieldAssociation.POINT:
+            raise TypeError('Contour filter only works on Point data. Array ({}) is in the Cell data.'.format(scalars))
+        alg.SetInputArrayToProcess(0, 0, 0, field.value, scalars) # args: (idx, port, connection, field, name)
         # set the isosurfaces
         if isinstance(isosurfaces, int):
             # generate values
             if rng is None:
                 rng = dataset.get_data_range(scalars)
             alg.GenerateValues(isosurfaces, rng)
-        elif isinstance(isosurfaces, collections.Iterable):
+        elif isinstance(isosurfaces, (np.ndarray, collections.abc.Sequence)):
             alg.SetNumberOfContours(len(isosurfaces))
             for i, val in enumerate(isosurfaces):
                 alg.SetValue(i, val)
         else:
-            raise RuntimeError('isosurfaces not understood.')
-        alg.Update()
+            raise TypeError('isosurfaces not understood.')
+        _update_alg(alg, progress_bar, 'Computing Contour')
         return _get_output(alg)
-
 
     def texture_map_to_plane(dataset, origin=None, point_u=None, point_v=None,
                              inplace=False, name='Texture Coordinates',
@@ -803,7 +867,7 @@ class DataSetFilters(object):
             The string name to give the new texture coordinates if applying
             the filter inplace.
 
-        use_bounds : bool
+        use_bounds : bool, optional
             Use the bounds to set the mapping plane by default (bottom plane
             of the bounding box).
 
@@ -811,8 +875,6 @@ class DataSetFilters(object):
         if use_bounds:
             if isinstance(use_bounds, (int, bool)):
                 b = dataset.GetBounds()
-            else:
-                b = use_bounds
             origin = [b[0], b[2], b[4]]   # BOTTOM LEFT CORNER
             point_u = [b[1], b[2], b[4]]  # BOTTOM RIGHT CORNER
             point_v = [b[0], b[3], b[4]] # TOP LEFT CORNER
@@ -837,7 +899,8 @@ class DataSetFilters(object):
         dataset.GetPointData().AddArray(otc) # Add old ones back at the end
         return # No return type because it is inplace
 
-    def compute_cell_sizes(dataset, length=True, area=True, volume=True):
+    def compute_cell_sizes(dataset, length=True, area=True, volume=True,
+                           progress_bar=False):
         """Compute sizes for 1D (length), 2D (area) and 3D (volume) cells.
 
         Parameters
@@ -851,6 +914,9 @@ class DataSetFilters(object):
         volume : bool
             Specify whether or not to compute the volume of 3D cells.
 
+        progress_bar : bool, optional
+            Display a progress bar to indicate progress.
+
         """
         alg = vtk.vtkCellSizeFilter()
         alg.SetInputDataObject(dataset)
@@ -858,7 +924,7 @@ class DataSetFilters(object):
         alg.SetComputeVolume(volume)
         alg.SetComputeLength(length)
         alg.SetComputeVertexCount(False)
-        alg.Update()
+        _update_alg(alg, progress_bar, 'Computing Cell Sizes')
         return _get_output(alg)
 
     def cell_centers(dataset, vertex=True):
@@ -879,9 +945,9 @@ class DataSetFilters(object):
         output = _get_output(alg)
         return output
 
-
     def glyph(dataset, orient=True, scale=True, factor=1.0, geom=None,
-              tolerance=0.0, absolute=False, clamping=False, rng=None):
+              tolerance=0.0, absolute=False, clamping=False, rng=None,
+              progress_bar=False):
         """Copy a geometric representation (called a glyph) to every point in the input dataset.
 
         The glyph may be oriented along the input vectors, and it may be scaled according to scalar
@@ -916,6 +982,9 @@ class DataSetFilters(object):
             Set the range of values to be considered by the filter when scalars
             values are provided.
 
+        progress_bar : bool, optional
+            Display a progress bar to indicate progress.
+
         """
         # Clean the points before glyphing
         small = pyvista.PolyData(dataset.points)
@@ -923,7 +992,7 @@ class DataSetFilters(object):
         dataset = small.clean(point_merging=True, merge_tol=tolerance,
                               lines_to_points=False, polys_to_lines=False,
                               strips_to_polys=False, inplace=False,
-                              absolute=absolute)
+                              absolute=absolute, progress_bar=progress_bar)
         # Make glyphing geometry
         if geom is None:
             arrow = vtk.vtkArrowSource()
@@ -953,9 +1022,8 @@ class DataSetFilters(object):
         alg.SetVectorModeToUseVector()
         alg.SetScaleFactor(factor)
         alg.SetClamping(clamping)
-        alg.Update()
+        _update_alg(alg, progress_bar, 'Computing Glyphs')
         return _get_output(alg)
-
 
     def connectivity(dataset, largest=False):
         """Find and label connected bodies/volumes.
@@ -983,7 +1051,6 @@ class DataSetFilters(object):
         alg.Update()
         return _get_output(alg)
 
-
     def extract_largest(dataset, inplace=False):
         """
         Extract largest connected set in mesh.
@@ -1009,7 +1076,6 @@ class DataSetFilters(object):
         else:
             return mesh
 
-
     def split_bodies(dataset, label=False):
         """Find, label, and split connected bodies/volumes.
 
@@ -1033,12 +1099,11 @@ class DataSetFilters(object):
                 # strange behavior:
                 # must use this method rather than deleting from the point_arrays
                 # or else object is collected.
-                b._remove_array(CELL_DATA_FIELD, 'RegionId')
-                b._remove_array(POINT_DATA_FIELD, 'RegionId')
+                b._remove_array(FieldAssociation.CELL, 'RegionId')
+                b._remove_array(FieldAssociation.POINT, 'RegionId')
             bodies.append(b)
 
         return bodies
-
 
     def warp_by_scalar(dataset, scalars=None, factor=1.0, normal=None,
                        inplace=False, **kwargs):
@@ -1050,10 +1115,10 @@ class DataSetFilters(object):
         Parameters
         ----------
         scalars : str, optional
-            Name of scalars to warb by. Defaults to currently active scalars.
+            Name of scalars to warp by. Defaults to currently active scalars.
 
         factor : float, optional
-            A scalaing factor to increase the scaling effect. Alias
+            A scaling factor to increase the scaling effect. Alias
             ``scale_factor`` also accepted - if present, overrides ``factor``.
 
         normal : np.array, list, tuple of length 3
@@ -1069,12 +1134,12 @@ class DataSetFilters(object):
         if scalars is None:
             field, scalars = dataset.active_scalars_info
         arr, field = get_array(dataset, scalars, preference='point', info=True)
-        if field != pyvista.POINT_DATA_FIELD:
-            raise AssertionError('Dataset can only by warped by a point data array.')
+        if field != FieldAssociation.POINT:
+            raise TypeError('Dataset can only by warped by a point data array.')
         # Run the algorithm
         alg = vtk.vtkWarpScalar()
         alg.SetInputDataObject(dataset)
-        alg.SetInputArrayToProcess(0, 0, 0, field, scalars) # args: (idx, port, connection, field, name)
+        alg.SetInputArrayToProcess(0, 0, 0, field.value, scalars) # args: (idx, port, connection, field, name)
         alg.SetScaleFactor(factor)
         if normal is not None:
             alg.SetNormal(normal)
@@ -1088,6 +1153,55 @@ class DataSetFilters(object):
             return
         return output
 
+    def warp_by_vector(dataset, vectors=None, factor=1.0, inplace=False):
+        """Warp the dataset's points by a point data vectors array's values.
+
+        This modifies point coordinates by moving points along point vectors by
+        the local vector times the scale factor.
+
+        A classical application of this transform is to visualize eigenmodes in
+        mechanics.
+
+        Parameters
+        ----------
+        vectors : str, optional
+            Name of vector to warp by. Defaults to currently active vector.
+
+        factor : float, optional
+            A scaling factor that multiplies the vectors to warp by. Can
+            be used to enhance the warping effect.
+
+        inplace : bool, optional
+            If True, the function will update the mesh in-place and
+            return ``None``.
+
+        Returns
+        -------
+        warped_mesh : mesh
+            The warped mesh resulting from the operation.
+
+        """
+        if vectors is None:
+            field, vectors = dataset.active_vectors_info
+        arr, field = get_array(dataset, vectors, preference='point', info=True)
+        if arr is None:
+            raise TypeError('No active vectors')
+
+        # check that this is indeed a vector field
+        if arr.ndim != 2 or arr.shape[1] != 3:
+            raise ValueError(
+                'Dataset can only by warped by a 3D vector point data array.' + \
+                'The values you provided do not satisfy this requirement')
+        alg = vtk.vtkWarpVector()
+        alg.SetInputDataObject(dataset)
+        alg.SetInputArrayToProcess(0, 0, 0, field.value, vectors)
+        alg.SetScaleFactor(factor)
+        alg.Update()
+        warped_mesh = _get_output(alg)
+        if inplace:
+            dataset.overwrite(warped_mesh)
+            return
+        return warped_mesh
 
     def cell_data_to_point_data(dataset, pass_cell_data=False):
         """Transform cell data into point data.
@@ -1116,7 +1230,6 @@ class DataSetFilters(object):
             active_scalars = dataset.active_scalars_name
         return _get_output(alg, active_scalars=active_scalars)
 
-
     def ctp(dataset, pass_cell_data=False):
         """Transform cell data into point data.
 
@@ -1127,7 +1240,6 @@ class DataSetFilters(object):
 
         """
         return DataSetFilters.cell_data_to_point_data(dataset, pass_cell_data=pass_cell_data)
-
 
     def point_data_to_cell_data(dataset, pass_point_data=False):
         """Transform point data into cell data.
@@ -1152,7 +1264,6 @@ class DataSetFilters(object):
             active_scalars = dataset.active_scalars_name
         return _get_output(alg, active_scalars=active_scalars)
 
-
     def ptc(dataset, pass_point_data=False):
         """Transform point data into cell data.
 
@@ -1163,7 +1274,6 @@ class DataSetFilters(object):
 
         """
         return DataSetFilters.point_data_to_cell_data(dataset, pass_point_data=pass_point_data)
-
 
     def triangulate(dataset, inplace=False):
         """Return an all triangle mesh.
@@ -1191,8 +1301,7 @@ class DataSetFilters(object):
         else:
             return mesh
 
-
-    def delaunay_3d(dataset, alpha=0, tol=0.001, offset=2.5):
+    def delaunay_3d(dataset, alpha=0, tol=0.001, offset=2.5, progress_bar=False):
         """Construct a 3D Delaunay triangulation of the mesh.
 
         This helps smooth out a rugged mesh.
@@ -1214,15 +1323,16 @@ class DataSetFilters(object):
             multiplier to control the size of the initial, bounding Delaunay
             triangulation.
 
+        progress_bar : bool, optional
+            Display a progress bar to indicate progress.
         """
         alg = vtk.vtkDelaunay3D()
         alg.SetInputData(dataset)
         alg.SetAlpha(alpha)
         alg.SetTolerance(tol)
         alg.SetOffset(offset)
-        alg.Update()
+        _update_alg(alg, progress_bar, 'Computing 3D Triangulation')
         return _get_output(alg)
-
 
     def select_enclosed_points(dataset, surface, tolerance=0.001,
                                inside_out=False, check_surface=True):
@@ -1286,9 +1396,66 @@ class DataSetFilters(object):
         out['SelectedPoints'] = bools
         return out
 
+    def probe(dataset, points, tolerance=None, pass_cell_arrays=True,
+              pass_point_arrays=True, categorical=False):
+        """Sample data values at specified point locations.
+
+        This uses :class:`vtk.vtkProbeFilter`.
+
+        Parameters
+        ----------
+        dataset: pyvista.Common
+            The mesh to probe from - point and cell arrays from
+            this object are probed onto the nodes of the ``points`` mesh
+
+        points: pyvista.Common
+            The points to probe values on to. This should be a PyVista mesh
+            or something :func:`pyvista.wrap` can handle.
+
+        tolerance: float, optional
+            Tolerance used to compute whether a point in the source is in a
+            cell of the input.  If not given, tolerance is automatically generated.
+
+        pass_cell_arrays: bool, optional
+            Preserve source mesh's original cell data arrays
+
+        pass_point_arrays: bool, optional
+            Preserve source mesh's original point data arrays
+
+        categorical : bool, optional
+            Control whether the source point data is to be treated as
+            categorical. If the data is categorical, then the resultant data
+            will be determined by a nearest neighbor interpolation scheme.
+
+        Examples
+        --------
+        Probe the active scalars in ``grid`` at the points in ``mesh``
+
+        >>> import pyvista as pv
+        >>> from pyvista import examples
+        >>> mesh = pyvista.Sphere(center=(4.5, 4.5, 4.5), radius=4.5)
+        >>> grid = examples.load_uniform()
+        >>> result = grid.probe(mesh)
+        >>> 'Spatial Point Data' in result.point_arrays
+        True
+
+        """
+        if not pyvista.is_pyvista_dataset(points):
+            points = pyvista.wrap(points)
+        alg = vtk.vtkProbeFilter()
+        alg.SetInputData(points)
+        alg.SetSourceData(dataset)
+        alg.SetPassCellArrays(pass_cell_arrays)
+        alg.SetPassPointArrays(pass_point_arrays)
+        alg.SetCategoricalData(categorical)
+        if tolerance is not None:
+            alg.SetComputeTolerance(False)
+            alg.SetTolerance(tolerance)
+        alg.Update() # Perform the resampling
+        return _get_output(alg)
 
     def sample(dataset, target, tolerance=None, pass_cell_arrays=True,
-               pass_point_arrays=True):
+               pass_point_arrays=True, categorical=False):
         """Resample array data from a passed mesh onto this mesh.
 
         This uses :class:`vtk.vtkResampleWithDataSet`.
@@ -1303,8 +1470,8 @@ class DataSetFilters(object):
             this object are sampled onto the nodes of the ``dataset`` mesh
 
         tolerance: float, optional
-            tolerance used to compute whether a point in the source is in a
-            cell of the input.  If not given, tolerance automatically generated.
+            Tolerance used to compute whether a point in the source is in a
+            cell of the input.  If not given, tolerance is automatically generated.
 
         pass_cell_arrays: bool, optional
             Preserve source mesh's original cell data arrays
@@ -1312,37 +1479,43 @@ class DataSetFilters(object):
         pass_point_arrays: bool, optional
             Preserve source mesh's original point data arrays
 
+        categorical : bool, optional
+            Control whether the source point data is to be treated as
+            categorical. If the data is categorical, then the resultant data
+            will be determined by a nearest neighbor interpolation scheme.
+
         """
+        if not pyvista.is_pyvista_dataset(target):
+            raise TypeError('`target` must be a PyVista mesh type.')
         alg = vtk.vtkResampleWithDataSet() # Construct the ResampleWithDataSet object
         alg.SetInputData(dataset)  # Set the Input data (actually the source i.e. where to sample from)
         alg.SetSourceData(target) # Set the Source data (actually the target, i.e. where to sample to)
         alg.SetPassCellArrays(pass_cell_arrays)
         alg.SetPassPointArrays(pass_point_arrays)
+        alg.SetCategoricalData(categorical)
         if tolerance is not None:
             alg.SetComputeTolerance(False)
             alg.SetTolerance(tolerance)
         alg.Update() # Perform the resampling
         return _get_output(alg)
 
-
-    def interpolate(dataset, points, sharpness=2, radius=1.0,
-                    dimensions=(101, 101, 101), pass_cell_arrays=True,
-                    pass_point_arrays=True, null_value=0.0):
-        """Interpolate values onto this mesh from the point data of a given dataset.
+    def interpolate(dataset, target, sharpness=2, radius=1.0,
+                    strategy='null_value', null_value=0.0, n_points=None,
+                    pass_cell_arrays=True, pass_point_arrays=True,
+                    progress_bar=False, ):
+        """Interpolate values onto this mesh from a given dataset.
 
         The input dataset is typically a point cloud.
 
         This uses a gaussian interpolation kernel. Use the ``sharpness`` and
-        ``radius`` parameters to adjust this kernel.
-
-        Please note that the source dataset is first interpolated onto a fine
-        UniformGrid which is then sampled to this mesh. The interpolation grid's
-        dimensions will likely need to be tweaked for each individual use case.
+        ``radius`` parameters to adjust this kernel. You can also switch this
+        kernel to use an N closest points approach.
 
         Parameters
         ----------
-        points : pyvista.PolyData
-            The points whose values will be interpolated onto this mesh.
+        target: pyvista.Common
+            The vtk data object to sample from - point and cell arrays from
+            this object are interpolated onto this mesh.
 
         sharpness : float
             Set / Get the sharpness (i.e., falloff) of the Gaussian. By
@@ -1352,39 +1525,77 @@ class DataSetFilters(object):
         radius : float
             Specify the radius within which the basis points must lie.
 
-        dimensions : tuple(int)
-            When interpolating the points, they are first interpolating on to a
-            :class:`pyvista.UniformGrid` with the same spatial extent -
-            ``dimensions`` is number of points along each axis for that grid.
+        n_points : int, optional
+            If given, specifies the number of the closest points used to form
+            the interpolation basis. This will invalidate the radius and
+            sharpness arguments in favor of an N closest points approach. This
+            typically has poorer results.
 
-        pass_cell_arrays: bool, optional
-            Preserve source mesh's original cell data arrays
-
-        pass_point_arrays: bool, optional
-            Preserve source mesh's original point data arrays
+        strategy : str, optional
+            Specify a strategy to use when encountering a "null" point during
+            the interpolation process. Null points occur when the local
+            neighborhood (of nearby points to interpolate from) is empty. If
+            the strategy is set to ``'mask_points'``, then an output array is
+            created that marks points as being valid (=1) or null (invalid
+            =0) (and the NullValue is set as well). If the strategy is set to
+            ``'null_value'`` (this is the default), then the output data
+            value(s) are set to the ``null_value`` (specified in the output
+            point data). Finally, the strategy ``'closest_point'`` is to simply
+            use the closest point to perform the interpolation.
 
         null_value : float, optional
             Specify the null point value. When a null point is encountered
             then all components of each null tuple are set to this value. By
             default the null value is set to zero.
 
+        pass_cell_arrays: bool, optional
+            Preserve input mesh's original cell data arrays
+
+        pass_point_arrays: bool, optional
+            Preserve input mesh's original point data arrays
+
+        progress_bar : bool, optional
+            Display a progress bar to indicate progress.
+
         """
-        box = pyvista.create_grid(dataset, dimensions=dimensions)
+        if not pyvista.is_pyvista_dataset(target):
+            raise TypeError('`target` must be a PyVista mesh type.')
+
+        # Must cast to UnstructuredGrid in some cases (e.g. vtkImageData/vtkRectilinearGrid)
+        # I believe the locator and the interpolator call `GetPoints` and not all mesh types have that method
+        if isinstance(target, (pyvista.UniformGrid, pyvista.RectilinearGrid)):
+            target = target.cast_to_unstructured_grid()
 
         gaussian_kernel = vtk.vtkGaussianKernel()
         gaussian_kernel.SetSharpness(sharpness)
         gaussian_kernel.SetRadius(radius)
+        gaussian_kernel.SetKernelFootprintToRadius()
+        if n_points:
+            gaussian_kernel.SetNumberOfPoints(n_points)
+            gaussian_kernel.SetKernelFootprintToNClosest()
+
+        locator = vtk.vtkStaticPointLocator()
+        locator.SetDataSet(target)
+        locator.BuildLocator()
 
         interpolator = vtk.vtkPointInterpolator()
-        interpolator.SetInputData(box)
-        interpolator.SetSourceData(points)
+        interpolator.SetInputData(dataset)
+        interpolator.SetSourceData(target)
         interpolator.SetKernel(gaussian_kernel)
+        interpolator.SetLocator(locator)
         interpolator.SetNullValue(null_value)
-        interpolator.Update()
-
-        return dataset.sample(interpolator.GetOutput(),
-                              pass_cell_arrays=pass_cell_arrays,
-                              pass_point_arrays=pass_point_arrays)
+        if strategy == 'null_value':
+            interpolator.SetNullPointsStrategyToNullValue()
+        elif strategy == 'mask_points':
+            interpolator.SetNullPointsStrategyToMaskPoints()
+        elif strategy == 'closest_point':
+            interpolator.SetNullPointsStrategyToClosestPoint()
+        else:
+            raise ValueError('strategy `{}` not supported.'.format(strategy))
+        interpolator.SetPassPointArrays(pass_point_arrays)
+        interpolator.SetPassCellArrays(pass_cell_arrays)
+        _update_alg(interpolator, progress_bar, 'Interpolating')
+        return _get_output(interpolator)
 
     def streamlines(dataset, vectors=None, source_center=None,
                     source_radius=None, n_points=100,
@@ -1503,15 +1714,15 @@ class DataSetFilters(object):
         """
         integration_direction = str(integration_direction).strip().lower()
         if integration_direction not in ['both', 'back', 'backward', 'forward']:
-            raise RuntimeError("integration direction must be one of: 'backward', 'forward', or 'both' - not '{}'.".format(integration_direction))
+            raise ValueError("integration direction must be one of: 'backward', 'forward', or 'both' - not '{}'.".format(integration_direction))
         if integrator_type not in [2, 4, 45]:
-            raise RuntimeError('integrator type must be one of `2`, `4`, or `45`.')
+            raise ValueError('integrator type must be one of `2`, `4`, or `45`.')
         if interpolator_type not in ['c', 'cell', 'p', 'point']:
-            raise RuntimeError("interpolator type must be either 'cell' or 'point'")
+            raise ValueError("interpolator type must be either 'cell' or 'point'")
         if step_unit not in ['l', 'cl']:
-            raise RuntimeError("step unit must be either 'l' or 'cl'")
-        step_unit = {'cl':vtk.vtkStreamTracer.CELL_LENGTH_UNIT,
-                     'l':vtk.vtkStreamTracer.LENGTH_UNIT}[step_unit]
+            raise ValueError("step unit must be either 'l' or 'cl'")
+        step_unit = {'cl': vtk.vtkStreamTracer.CELL_LENGTH_UNIT,
+                     'l': vtk.vtkStreamTracer.LENGTH_UNIT}[step_unit]
         if isinstance(vectors, str):
             dataset.set_active_scalars(vectors)
             dataset.set_active_vectors(vectors)
@@ -1581,7 +1792,6 @@ class DataSetFilters(object):
             return output, src
         return output
 
-
     def decimate_boundary(dataset, target_reduction=0.5):
         """Return a decimated version of a triangulation of the boundary.
 
@@ -1598,13 +1808,44 @@ class DataSetFilters(object):
         """
         return dataset.extract_geometry().triangulate().decimate(target_reduction)
 
+    def sample_over_line(dataset, pointa, pointb, resolution=None, tolerance=None):
+        """Sample a dataset onto a line.
+
+        Parameters
+        ----------
+        pointa : np.ndarray or list
+            Location in [x, y, z].
+
+        pointb : np.ndarray or list
+            Location in [x, y, z].
+
+        resolution : int
+            Number of pieces to divide line into. Defaults to number of cells
+            in the input mesh. Must be a positive integer.
+
+        tolerance: float, optional
+            Tolerance used to compute whether a point in the source is in a
+            cell of the input.  If not given, tolerance is automatically generated.
+
+        Return
+        ------
+        sampled_line : pv.PolyData
+            Line object with sampled data from dataset.
+        """
+        if resolution is None:
+            resolution = int(dataset.n_cells)
+        # Make a line and sample the dataset
+        line = pyvista.Line(pointa, pointb, resolution=resolution)
+
+        sampled_line = line.sample(dataset, tolerance=tolerance)
+        return sampled_line
 
     def plot_over_line(dataset, pointa, pointb, resolution=None, scalars=None,
                        title=None, ylabel=None, figsize=None, figure=True,
-                       show=True):
-        """Sample a dataset along a high resolution line.
+                       show=True, tolerance=None):
+        """Sample a dataset along a high resolution line and plot.
 
-        Also plot the variables of interest in 2D where the X-axis is distance from
+        Plot the variables of interest in 2D where the X-axis is distance from
         Point A and the Y-axis is the variable of interest. Note that this filter
         returns None.
 
@@ -1639,20 +1880,19 @@ class DataSetFilters(object):
         show : bool
             Shows the matplotlib figure
 
+        tolerance: float, optional
+            Tolerance used to compute whether a point in the source is in a
+            cell of the input.  If not given, tolerance is automatically generated.
+
         """
         # Ensure matplotlib is available
         try:
             import matplotlib.pyplot as plt
-        except ImportError:
+        except ImportError:  # pragma: no cover
             raise ImportError('matplotlib must be available to use this filter.')
 
-        if resolution is None:
-            resolution = int(dataset.n_cells)
-        if not isinstance(resolution, int) or resolution < 0:
-            raise RuntimeError('`resolution` must be a positive integer, not {}'.format(type(resolution)))
-        # Make a line and probe the dataset
-        line = pyvista.Line(pointa, pointb, resolution=resolution)
-        sampled = line.sample(dataset)
+        # Sample on line
+        sampled = DataSetFilters.sample_over_line(dataset, pointa, pointb, resolution, tolerance)
 
         # Get variable of interest
         if scalars is None:
@@ -1660,7 +1900,7 @@ class DataSetFilters(object):
         values = sampled.get_array(scalars)
         distance = sampled['Distance']
 
-        # Remainder of the is plotting
+        # Remainder is plotting
         if figure:
             plt.figure(figsize=figsize)
         # Plot it in 2D
@@ -1679,9 +1919,8 @@ class DataSetFilters(object):
             plt.title('{} Profile'.format(scalars))
         else:
             plt.title(title)
-        if show:
+        if show:  # pragma: no cover
             return plt.show()
-
 
     def extract_cells(dataset, ind):
         """Return a subset of the grid.
@@ -1697,25 +1936,11 @@ class DataSetFilters(object):
             Subselected grid
 
         """
-        if not isinstance(ind, np.ndarray):
-            ind = np.array(ind, np.ndarray)
-
-        if ind.dtype == np.bool:
-            ind = ind.nonzero()[0].astype(pyvista.ID_TYPE)
-
-        if ind.dtype != pyvista.ID_TYPE:
-            ind = ind.astype(pyvista.ID_TYPE)
-
-        if not ind.flags.c_contiguous:
-            ind = np.ascontiguousarray(ind)
-
-        vtk_ind = numpy_to_vtkIdTypeArray(ind, deep=False)
-
         # Create selection objects
         selectionNode = vtk.vtkSelectionNode()
         selectionNode.SetFieldType(vtk.vtkSelectionNode.CELL)
         selectionNode.SetContentType(vtk.vtkSelectionNode.INDICES)
-        selectionNode.SetSelectionList(vtk_ind)
+        selectionNode.SetSelectionList(numpy_to_idarr(ind))
 
         selection = vtk.vtkSelection()
         selection.AddNode(selectionNode)
@@ -1734,13 +1959,12 @@ class DataSetFilters(object):
 
         return subgrid
 
-
     def extract_points(dataset, ind):
         """Return a subset of the grid (with cells) that contains any of the given point indices.
 
         Parameters
         ----------
-        ind : np.ndarray, list, or iterable
+        ind : np.ndarray, list, or sequence
             Numpy array of point indices to be extracted.
 
         Return
@@ -1749,24 +1973,11 @@ class DataSetFilters(object):
             Subselected grid.
 
         """
-        try:
-            ind = np.array(ind)
-        except:
-            raise Exception('indices must be either a mask, array, list, or iterable')
-
-        # Convert to vtk indices
-        if ind.dtype == np.bool:
-            ind = ind.nonzero()[0]
-
-        if ind.dtype != np.int64:
-            ind = ind.astype(np.int64)
-        vtk_ind = numpy_to_vtkIdTypeArray(ind, deep=True)
-
         # Create selection objects
         selectionNode = vtk.vtkSelectionNode()
         selectionNode.SetFieldType(vtk.vtkSelectionNode.POINT)
         selectionNode.SetContentType(vtk.vtkSelectionNode.INDICES)
-        selectionNode.SetSelectionList(vtk_ind)
+        selectionNode.SetSelectionList(numpy_to_idarr(ind))
         selectionNode.GetProperties().Set(vtk.vtkSelectionNode.CONTAINING_CELLS(), 1)
 
         selection = vtk.vtkSelection()
@@ -1779,8 +1990,7 @@ class DataSetFilters(object):
         extract_sel.Update()
         return _get_output(extract_sel)
 
-
-    def extract_selection_points(dataset, ind):
+    def extract_selection_points(dataset, ind):  # pragma: no cover
         """Return a subset of the grid (with cells) that contains any of the given point indices.
 
         DEPRECATED: Please use ``extract_points`` instead.
@@ -1788,7 +1998,6 @@ class DataSetFilters(object):
         """
         logging.warning("DEPRECATED: use ``extract_points`` instead.")
         return DataSetFilters.extract_points(dataset, ind)
-
 
     def extract_surface(dataset, pass_pointid=True, pass_cellid=True, inplace=False):
         """Extract surface mesh of the grid.
@@ -1802,9 +2011,6 @@ class DataSetFilters(object):
         pass_cellid : bool, optional
             Adds a cell array "vtkOriginalPointIds" that idenfities which
             original cells these surface cells correspond to
-
-        inplace : bool, optional
-            Return new mesh or overwrite input.
 
         Return
         ------
@@ -1820,12 +2026,11 @@ class DataSetFilters(object):
             surf_filter.PassThroughPointIdsOn()
         surf_filter.Update()
 
-        mesh = _get_output(surf_filter)
-        if inplace:
-            dataset.overwrite(mesh)
-        else:
-            return mesh
+        # need to add
+        # surf_filter.SetNonlinearSubdivisionLevel(subdivision)
 
+        mesh = _get_output(surf_filter)
+        return mesh
 
     def surface_indices(dataset):
         """Return the surface indices of a grid.
@@ -1839,10 +2044,9 @@ class DataSetFilters(object):
         surf = DataSetFilters.extract_surface(dataset, pass_cellid=True)
         return surf.point_arrays['vtkOriginalPointIds']
 
-
-    def extract_edges(dataset, feature_angle=30, boundary_edges=True,
-                      non_manifold_edges=True, feature_edges=True,
-                      manifold_edges=True, inplace=False):
+    def extract_feature_edges(dataset, feature_angle=30, boundary_edges=True,
+                              non_manifold_edges=True, feature_edges=True,
+                              manifold_edges=True, inplace=False):
         """Extract edges from the surface of the mesh.
 
         If the given mesh is not PolyData, the external surface of the given
@@ -1899,6 +2103,15 @@ class DataSetFilters(object):
         else:
             return mesh
 
+    @wraps(extract_feature_edges)
+    def extract_edges(self, *args, **kwargs):  # pragma: no cover
+        """Wrap ``extract_feature_edges``.
+
+        DEPRECATED: Please use ``extract_feature_edges`` instead.
+
+        """
+        logging.warning("DEPRECATED: ``.extract_edges`` is deprecated. Use ``.extract_feature_edges`` instead.")
+        return self.extract_feature_edges(*args, **kwargs)
 
     def merge(dataset, grid=None, merge_points=True, inplace=False,
               main_has_priority=True):
@@ -1906,7 +2119,7 @@ class DataSetFilters(object):
 
         Grid is updated in-place by default.
 
-        Can be used to merge points of adjcent cells when no grids
+        Can be used to merge points of adjacent cells when no grids
         are input.
 
         Parameters
@@ -1961,15 +2174,13 @@ class DataSetFilters(object):
             if type(dataset) == type(merged):
                 dataset.deep_copy(merged)
             else:
-                raise TypeError("Mesh tpye {} not able to be overridden by output.".format(type(dataset)))
+                raise TypeError("Mesh type {} cannot be overridden by output.".format(type(dataset)))
         else:
             return merged
-
 
     def __add__(dataset, grid):
         """Combine this mesh with another into an :class:`pyvista.UnstructuredGrid`."""
         return DataSetFilters.merge(dataset, grid)
-
 
     def compute_cell_quality(dataset, quality_measure='scaled_jacobian', null_value=-1.0):
         """Compute a function of (geometric) quality for each cell of a mesh.
@@ -2068,44 +2279,117 @@ class DataSetFilters(object):
         alg.Update()
         return _get_output(alg)
 
+    def compute_derivative(dataset, scalars=None, gradient=True,
+                           divergence=None, vorticity=None, qcriterion=None,
+                           faster=False, preference='point'):
+        """Compute derivative-based quantities of point/cell scalar field.
 
-    def compute_gradient(dataset, scalars=None, gradient_name='gradient',
-                         preference='point'):
-        """Compute per cell gradient of point/cell scalar field.
+        Utilize ``vtkGradientFilter`` to compute derivative-based quantities,
+        such as gradient, divergence, vorticity, and Q-criterion, of the
+        selected point or cell scalar field.
 
         Parameters
         ----------
-        scalars : str
-            String name of the scalars array to use when computing gradient.
+        scalars : str, optional
+            String name of the scalars array to use when computing the
+            derivative quantities.
 
-        gradient_name : str, optional
-            The name of the output array of the computed gradient.
+        gradient: bool, str, optional
+            Calculate gradient. If a string is passed, the string will be used
+            for the resulting array name. Otherwise, array name will be
+            'gradient'. Default: True
+
+        divergence: bool, str, optional
+            Calculate divergence. If a string is passed, the string will be
+            used for the resulting array name. Otherwise, array name will be
+            'divergence'. Default: None
+
+        vorticity: bool, str, optional
+            Calculate vorticity. If a string is passed, the string will be used
+            for the resulting array name. Otherwise, array name will be
+            'vorticity'. Default: None
+
+        qcriterion: bool, str, optional
+            Calculate qcriterion. If a string is passed, the string will be
+            used for the resulting array name. Otherwise, array name will be
+            'qcriterion'. Default: None
+
+        faster: bool, optional
+            Use faster algorithm for computing derivative quantities. Result is
+            less accurate and performs fewer derivative calculations,
+            increasing computation speed. The error will feature smoothing of
+            the output and possibly errors at boundaries. Option has no effect
+            if DataSet is not UnstructuredGrid. Default: False
+
+        preference: str, optional
+            Data type preference. Either 'point' or 'cell'.
 
         """
         alg = vtk.vtkGradientFilter()
         # Check if scalars array given
         if scalars is None:
             field, scalars = dataset.active_scalars_info
+            if scalars is None:
+                raise TypeError('No active scalars.  Must input scalars array name')
         if not isinstance(scalars, str):
             raise TypeError('scalars array must be given as a string name')
+        if not any((gradient, divergence, vorticity, qcriterion)):
+            raise ValueError('must set at least one of gradient, divergence, vorticity, or qcriterion')
+
+            # bool(non-empty string/True) == True, bool(None/False) == False
+        alg.SetComputeGradient(bool(gradient))
+        if isinstance(gradient, bool):
+            gradient = 'gradient'
+        alg.SetResultArrayName(gradient)
+
+        alg.SetComputeDivergence(bool(divergence))
+        if isinstance(divergence, bool):
+            divergence = 'divergence'
+        alg.SetDivergenceArrayName(divergence)
+
+        alg.SetComputeVorticity(bool(vorticity))
+        if isinstance(vorticity, bool):
+            vorticity = 'vorticity'
+        alg.SetVorticityArrayName(vorticity)
+
+        alg.SetComputeQCriterion(bool(qcriterion))
+        if isinstance(qcriterion, bool):
+            qcriterion = 'qcriterion'
+        alg.SetQCriterionArrayName(qcriterion)
+
+        alg.SetFasterApproximation(faster)
         _, field = dataset.get_array(scalars, preference=preference, info=True)
         # args: (idx, port, connection, field, name)
-        alg.SetInputArrayToProcess(0, 0, 0, field, scalars)
+        alg.SetInputArrayToProcess(0, 0, 0, field.value, scalars)
         alg.SetInputData(dataset)
-        alg.SetResultArrayName(gradient_name)
         alg.Update()
         return _get_output(alg)
 
+    def compute_gradient(self, scalars=None, gradient_name='gradient',
+                         preference='point'):
+        """Compute per cell gradient of point/cell scalar field.
 
-class CompositeFilters(object):
+        DEPRECATED: Use ``compute_derivative`` instead.
+
+        Parameters
+        ----------
+        scalars : str, optional
+            String name of the scalars array to use when computing gradient.
+
+        gradient_name : str, optional
+            The name of the output array of the computed gradient.
+
+        preference: str, optional
+            Data type preference. Either 'point' or 'cell'.
+
+        """
+        logging.warning('DEPRECATED: ``.compute_gradient`` is deprecated. Use ``.compute_derivative`` instead.')
+        return self.compute_derivative(scalars=scalars, gradient=gradient_name,
+                                       preference=preference)
+
+@abstract_class
+class CompositeFilters:
     """An internal class to manage filtes/algorithms for composite datasets."""
-
-    def __new__(cls, *args, **kwargs):
-        """Allocate memory for the composite filters."""
-        if cls is CompositeFilters:
-            raise TypeError("pyvista.CompositeFilters is an abstract class and may not be instantiated.")
-        return object.__new__(cls)
-
 
     def extract_geometry(composite):
         """Combine the geomertry of all blocks into a single ``PolyData`` object.
@@ -2120,7 +2404,6 @@ class CompositeFilters(object):
         gf.Update()
         return wrap(gf.GetOutputDataObject(0))
 
-
     def combine(composite, merge_points=False):
         """Append all blocks into a single unstructured grid.
 
@@ -2132,50 +2415,40 @@ class CompositeFilters(object):
         """
         alg = vtk.vtkAppendFilter()
         for block in composite:
+            if isinstance(block, vtk.vtkMultiBlockDataSet):
+                block = CompositeFilters.combine(block, merge_points=merge_points)
             alg.AddInputData(block)
         alg.SetMergePoints(merge_points)
         alg.Update()
         return wrap(alg.GetOutputDataObject(0))
 
-
     clip = DataSetFilters.clip
-
 
     clip_box = DataSetFilters.clip_box
 
-
     slice = DataSetFilters.slice
-
 
     slice_orthogonal = DataSetFilters.slice_orthogonal
 
-
     slice_along_axis = DataSetFilters.slice_along_axis
-
 
     slice_along_line = DataSetFilters.slice_along_line
 
+    extract_all_edges = DataSetFilters.extract_all_edges
 
     wireframe = DataSetFilters.wireframe
 
-
     elevation = DataSetFilters.elevation
-
 
     compute_cell_sizes = DataSetFilters.compute_cell_sizes
 
-
     cell_centers = DataSetFilters.cell_centers
-
 
     cell_data_to_point_data = DataSetFilters.cell_data_to_point_data
 
-
     point_data_to_cell_data = DataSetFilters.point_data_to_cell_data
 
-
     triangulate = DataSetFilters.triangulate
-
 
     def outline(composite, generate_faces=False, nested=False):
         """Produce an outline of the full extent for the all blocks in this composite dataset.
@@ -2193,7 +2466,6 @@ class CompositeFilters(object):
             return DataSetFilters.outline(composite, generate_faces=generate_faces)
         box = pyvista.Box(bounds=composite.bounds)
         return box.outline(generate_faces=generate_faces)
-
 
     def outline_corners(composite, factor=0.2, nested=False):
         """Produce an outline of the corners for the all blocks in this composite dataset.
@@ -2214,15 +2486,9 @@ class CompositeFilters(object):
         return box.outline_corners(factor=factor)
 
 
-
+@abstract_class
 class PolyDataFilters(DataSetFilters):
     """An internal class to manage filtes/algorithms for polydata datasets."""
-
-    def __new__(cls, *args, **kwargs):
-        """Allocate memory for the polydata filters."""
-        if cls is PolyDataFilters:
-            raise TypeError("pyvista.PolyDataFilters is an abstract class and may not be instantiated.")
-        return object.__new__(cls)
 
     def edge_mask(poly_data, angle):
         """Return a mask of the points of a surface mesh that has a surface angle greater than angle.
@@ -2233,7 +2499,7 @@ class PolyDataFilters(DataSetFilters):
             Angle to consider an edge.
 
         """
-        if not isinstance(poly_data, pyvista.PolyData):
+        if not isinstance(poly_data, pyvista.PolyData):  # pragma: no cover
             poly_data = pyvista.PolyData(poly_data)
         poly_data.point_arrays['point_ind'] = np.arange(poly_data.n_points)
         featureEdges = vtk.vtkFeatureEdges()
@@ -2249,7 +2515,6 @@ class PolyDataFilters(DataSetFilters):
 
         return np.in1d(poly_data.point_arrays['point_ind'], orig_id,
                        assume_unique=True)
-
 
     def boolean_cut(poly_data, cut, tolerance=1E-5, inplace=False):
         """Perform a Boolean cut using another mesh.
@@ -2268,8 +2533,10 @@ class PolyDataFilters(DataSetFilters):
             The cut mesh when inplace=False
 
         """
+        if not isinstance(cut, pyvista.PolyData):
+            raise TypeError("Input mesh must be PolyData.")
         if not poly_data.is_all_triangles() or not cut.is_all_triangles():
-            raise RuntimeError("Make sure both the input and output are triangulated.")
+            raise NotAllTrianglesError("Make sure both the input and output are triangulated.")
 
         bfilter = vtk.vtkBooleanOperationPolyDataFilter()
         bfilter.SetOperationToIntersection()
@@ -2286,7 +2553,6 @@ class PolyDataFilters(DataSetFilters):
             poly_data.overwrite(mesh)
         else:
             return mesh
-
 
     def boolean_add(poly_data, mesh, inplace=False):
         """Add a mesh to the current mesh.
@@ -2307,6 +2573,9 @@ class PolyDataFilters(DataSetFilters):
             Initial mesh and the new mesh when inplace=False.
 
         """
+        if not isinstance(mesh, pyvista.PolyData):
+            raise TypeError("Input mesh must be PolyData.")
+
         vtkappend = vtk.vtkAppendPolyData()
         vtkappend.AddInputData(poly_data)
         vtkappend.AddInputData(mesh)
@@ -2318,13 +2587,11 @@ class PolyDataFilters(DataSetFilters):
         else:
             return mesh
 
-
     def __add__(poly_data, mesh):
         """Merge these two meshes."""
         if not isinstance(mesh, vtk.vtkPolyData):
             return DataSetFilters.__add__(poly_data, mesh)
         return PolyDataFilters.boolean_add(poly_data, mesh)
-
 
     def boolean_union(poly_data, mesh, inplace=False):
         """Combine two meshes and attempts to create a manifold mesh.
@@ -2343,6 +2610,9 @@ class PolyDataFilters(DataSetFilters):
             The union mesh when inplace=False.
 
         """
+        if not isinstance(mesh, pyvista.PolyData):
+            raise TypeError("Input mesh must be PolyData.")
+
         bfilter = vtk.vtkBooleanOperationPolyDataFilter()
         bfilter.SetOperationToUnion()
         bfilter.SetInputData(1, mesh)
@@ -2355,7 +2625,6 @@ class PolyDataFilters(DataSetFilters):
             poly_data.overwrite(mesh)
         else:
             return mesh
-
 
     def boolean_difference(poly_data, mesh, inplace=False):
         """Combine two meshes and retains only the volume in common between the meshes.
@@ -2374,6 +2643,9 @@ class PolyDataFilters(DataSetFilters):
             The union mesh when inplace=False.
 
         """
+        if not isinstance(mesh, pyvista.PolyData):
+            raise TypeError("Input mesh must be PolyData.")
+
         bfilter = vtk.vtkBooleanOperationPolyDataFilter()
         bfilter.SetOperationToDifference()
         bfilter.SetInputData(1, mesh)
@@ -2386,7 +2658,6 @@ class PolyDataFilters(DataSetFilters):
             poly_data.overwrite(mesh)
         else:
             return mesh
-
 
     def curvature(poly_data, curv_type='mean'):
         """Return the pointwise curvature of a mesh.
@@ -2423,14 +2694,13 @@ class PolyDataFilters(DataSetFilters):
         elif curv_type == 'minimum':
             curvefilter.SetCurvatureTypeToMinimum()
         else:
-            raise Exception('Curv_Type must be either "Mean", '
-                            '"Gaussian", "Maximum", or "Minimum"')
+            raise ValueError('Curv_Type must be either "Mean", '
+                             '"Gaussian", "Maximum", or "Minimum"')
         curvefilter.Update()
 
         # Compute and return curvature
         curv = _get_output(curvefilter)
         return vtk_to_numpy(curv.GetPointData().GetScalars())
-
 
     def plot_curvature(poly_data, curv_type='mean', **kwargs):
         """Plot the curvature.
@@ -2457,11 +2727,10 @@ class PolyDataFilters(DataSetFilters):
         return poly_data.plot(scalars=poly_data.curvature(curv_type),
                               stitle='%s\nCurvature' % curv_type, **kwargs)
 
-
     def triangulate(poly_data, inplace=False):
         """Return an all triangle mesh.
 
-        More complex polygons will be broken down into triangles.
+        More complex polygons will be broken down into tetrahedrals.
 
         Parameters
         ----------
@@ -2486,8 +2755,7 @@ class PolyDataFilters(DataSetFilters):
         else:
             return mesh
 
-
-    def tri_filter(poly_data, inplace=False):
+    def tri_filter(poly_data, inplace=False):  # pragma: no cover
         """Return an all triangle mesh.
 
         DEPRECATED: Please use ``triangulate`` instead.
@@ -2495,7 +2763,6 @@ class PolyDataFilters(DataSetFilters):
         """
         logging.warning("DEPRECATED: ``.tri_filter`` is deprecated. Use ``.triangulate`` instead.")
         return PolyDataFilters.triangulate(poly_data, inplace=inplace)
-
 
     def smooth(poly_data, n_iter=20, relaxation_factor=0.01, convergence=0.0,
                edge_angle=15, feature_angle=45,
@@ -2556,7 +2823,6 @@ class PolyDataFilters(DataSetFilters):
             poly_data.overwrite(mesh)
         else:
             return mesh
-
 
     def decimate_pro(poly_data, reduction, feature_angle=45.0, split_angle=75.0, splitting=True,
                      pre_split_mesh=False, preserve_topology=False, inplace=False):
@@ -2620,7 +2886,6 @@ class PolyDataFilters(DataSetFilters):
         else:
             return mesh
 
-
     def tube(poly_data, radius=None, scalars=None, capping=True, n_sides=20,
              radius_factor=10, preference='point', inplace=False):
         """Generate a tube around each input line.
@@ -2674,7 +2939,7 @@ class PolyDataFilters(DataSetFilters):
                 raise TypeError('scalars array must be given as a string name')
             _, field = poly_data.get_array(scalars, preference=preference, info=True)
             # args: (idx, port, connection, field, name)
-            tube.SetInputArrayToProcess(0, 0, 0, field, scalars)
+            tube.SetInputArrayToProcess(0, 0, 0, field.value, scalars)
             tube.SetVaryRadiusToVaryRadiusByScalar()
         # Apply the filter
         tube.Update()
@@ -2684,7 +2949,6 @@ class PolyDataFilters(DataSetFilters):
             poly_data.overwrite(mesh)
         else:
             return mesh
-
 
     def subdivide(poly_data, nsub, subfilter='linear', inplace=False):
         """Increase the number of triangles in a single, connected triangular mesh.
@@ -2742,8 +3006,8 @@ class PolyDataFilters(DataSetFilters):
         elif subfilter == 'loop':
             sfilter = vtk.vtkLoopSubdivisionFilter()
         else:
-            raise Exception("Subdivision filter must be one of the following: "
-                            "'butterfly', 'loop', or 'linear'")
+            raise ValueError("Subdivision filter must be one of the following: "
+                             "'butterfly', 'loop', or 'linear'")
 
         # Subdivide
         sfilter.SetNumberOfSubdivisions(nsub)
@@ -2756,12 +3020,11 @@ class PolyDataFilters(DataSetFilters):
         else:
             return submesh
 
-
     def decimate(poly_data, target_reduction, volume_preservation=False,
                  attribute_error=False, scalars=True, vectors=True,
                  normals=False, tcoords=True, tensors=True, scalars_weight=0.1,
                  vectors_weight=0.1, normals_weight=0.1, tcoords_weight=0.1,
-                 tensors_weight=0.1, inplace=False):
+                 tensors_weight=0.1, inplace=False, progress_bar=False):
         """Reduce the number of triangles in a triangular mesh using vtkQuadricDecimation.
 
         Parameters
@@ -2824,6 +3087,9 @@ class PolyDataFilters(DataSetFilters):
         inplace : bool, optional
             Updates mesh in-place while returning nothing.
 
+        progress_bar : bool, optional
+            Display a progress bar to indicate progress.
+
         Return
         ------
         outmesh : pyvista.PolyData
@@ -2831,31 +3097,30 @@ class PolyDataFilters(DataSetFilters):
 
         """
         # create decimation filter
-        decimate = vtk.vtkQuadricDecimation()  # vtkDecimatePro as well
+        alg = vtk.vtkQuadricDecimation()  # vtkDecimatePro as well
 
-        decimate.SetVolumePreservation(volume_preservation)
-        decimate.SetAttributeErrorMetric(attribute_error)
-        decimate.SetScalarsAttribute(scalars)
-        decimate.SetVectorsAttribute(vectors)
-        decimate.SetNormalsAttribute(normals)
-        decimate.SetTCoordsAttribute(tcoords)
-        decimate.SetTensorsAttribute(tensors)
-        decimate.SetScalarsWeight(scalars_weight)
-        decimate.SetVectorsWeight(vectors_weight)
-        decimate.SetNormalsWeight(normals_weight)
-        decimate.SetTCoordsWeight(tcoords_weight)
-        decimate.SetTensorsWeight(tensors_weight)
-        decimate.SetTargetReduction(target_reduction)
+        alg.SetVolumePreservation(volume_preservation)
+        alg.SetAttributeErrorMetric(attribute_error)
+        alg.SetScalarsAttribute(scalars)
+        alg.SetVectorsAttribute(vectors)
+        alg.SetNormalsAttribute(normals)
+        alg.SetTCoordsAttribute(tcoords)
+        alg.SetTensorsAttribute(tensors)
+        alg.SetScalarsWeight(scalars_weight)
+        alg.SetVectorsWeight(vectors_weight)
+        alg.SetNormalsWeight(normals_weight)
+        alg.SetTCoordsWeight(tcoords_weight)
+        alg.SetTensorsWeight(tensors_weight)
+        alg.SetTargetReduction(target_reduction)
 
-        decimate.SetInputData(poly_data)
-        decimate.Update()
+        alg.SetInputData(poly_data)
+        _update_alg(alg, progress_bar, 'Decimating')
 
-        mesh = _get_output(decimate)
+        mesh = _get_output(alg)
         if inplace:
             poly_data.overwrite(mesh)
         else:
             return mesh
-
 
     def compute_normals(poly_data, cell_normals=True, point_normals=True,
                         split_vertices=False, flip_normals=False,
@@ -2954,14 +3219,12 @@ class PolyDataFilters(DataSetFilters):
         if cell_normals:
             mesh.GetCellData().SetActiveNormals('Normals')
 
-
         if inplace:
             poly_data.overwrite(mesh)
         else:
             return mesh
 
-
-    def clip_with_plane(poly_data, origin, normal, value=0, invert=False, inplace=False):
+    def clip_with_plane(poly_data, origin, normal, value=0, invert=False, inplace=False):  # pragma: no cover
         """Clip a dataset by a plane by specifying the origin and normal.
 
         DEPRECATED: Please use `.clip` instead.
@@ -2970,8 +3233,50 @@ class PolyDataFilters(DataSetFilters):
         logging.warning('DEPRECATED: ``clip_with_plane`` is deprecated. Use ``.clip`` instead.')
         return DataSetFilters.clip(poly_data, normal=normal, origin=origin, value=value, invert=invert, inplace=inplace)
 
+    def clip_closed_surface(poly_data, normal='x', origin=None,
+                            tolerance=1e-06, inplace=False):
+        """Clip a closed polydata surface with a plane.
 
-    def fill_holes(poly_data, hole_size, inplace=False):  # pragma: no cover
+        This currently only supports one plane but could be implemented to
+        handle a plane collection.
+
+        It will produce a new closed surface by creating new polygonal faces
+        where the input data was clipped.
+
+        Non-manifold surfaces should not be used as input for this filter.
+        The input surface should have no open edges, and must not have any
+        edges that are shared by more than two faces. In addition, the input
+        surface should not self-intersect, meaning that the faces of the
+        surface should only touch at their edges.
+        """
+        # verify it is manifold
+        if poly_data.n_open_edges > 0:
+            raise ValueError("This surface appears to be non-manifold.")
+        if isinstance(normal, str):
+            normal = NORMALS[normal.lower()]
+        # find center of data if origin not specified
+        if origin is None:
+            origin = poly_data.center
+
+        # create the plane for clipping
+        plane = generate_plane(normal, origin)
+        collection = vtk.vtkPlaneCollection()
+        collection.AddItem(plane)
+
+        alg = vtk.vtkClipClosedSurface()
+        alg.SetGenerateFaces(True)
+        alg.SetInputDataObject(poly_data)
+        alg.SetTolerance(tolerance)
+        alg.SetClippingPlanes(collection)
+        alg.Update() # Perform the Cut
+        result = _get_output(alg)
+
+        if inplace:
+            poly_data.overwrite(result)
+        else:
+            return result
+
+    def fill_holes(poly_data, hole_size, inplace=False, progress_bar=False):  # pragma: no cover
         """
         Fill holes in a pyvista.PolyData or vtk.vtkPolyData object.
 
@@ -2991,6 +3296,9 @@ class PolyDataFilters(DataSetFilters):
         inplace : bool, optional
             Return new mesh or overwrite input.
 
+        progress_bar : bool, optional
+            Display a progress bar to indicate progress.
+
         Returns
         -------
         mesh : pyvista.PolyData
@@ -2999,12 +3307,12 @@ class PolyDataFilters(DataSetFilters):
         """
         logging.warning('pyvista.PolyData.fill_holes is known to segfault. '
                         'Use at your own risk')
-        fill = vtk.vtkFillHolesFilter()
-        fill.SetHoleSize(hole_size)
-        fill.SetInputData(poly_data)
-        fill.Update()
+        alg = vtk.vtkFillHolesFilter()
+        alg.SetHoleSize(hole_size)
+        alg.SetInputData(poly_data)
+        _update_alg(alg, progress_bar, 'Filling Holes')
 
-        mesh = _get_output(fill)
+        mesh = _get_output(alg)
         if inplace:
             poly_data.overwrite(mesh)
         else:
@@ -3012,7 +3320,7 @@ class PolyDataFilters(DataSetFilters):
 
     def clean(poly_data, point_merging=True, tolerance=None, lines_to_points=True,
               polys_to_lines=True, strips_to_polys=True, inplace=False,
-              absolute=True, **kwargs):
+              absolute=True, progress_bar=False, **kwargs):
         """Clean the mesh.
 
         This merges duplicate points, removes unused points, and/or removes
@@ -3046,6 +3354,9 @@ class PolyDataFilters(DataSetFilters):
         absolute : bool, optional
             Control if ``tolerance`` is an absolute distance or a fraction.
 
+        progress_bar : bool, optional
+            Display a progress bar to indicate progress.
+
         Return
         ------
         mesh : pyvista.PolyData
@@ -3055,34 +3366,35 @@ class PolyDataFilters(DataSetFilters):
         if tolerance is None:
             tolerance = kwargs.pop('merge_tol', None)
         assert_empty_kwargs(**kwargs)
-        clean = vtk.vtkCleanPolyData()
-        clean.SetPointMerging(point_merging)
-        clean.SetConvertLinesToPoints(lines_to_points)
-        clean.SetConvertPolysToLines(polys_to_lines)
-        clean.SetConvertStripsToPolys(strips_to_polys)
+        alg = vtk.vtkCleanPolyData()
+        alg.SetPointMerging(point_merging)
+        alg.SetConvertLinesToPoints(lines_to_points)
+        alg.SetConvertPolysToLines(polys_to_lines)
+        alg.SetConvertStripsToPolys(strips_to_polys)
         if isinstance(tolerance, (int, float)):
             if absolute:
-                clean.ToleranceIsAbsoluteOn()
-                clean.SetAbsoluteTolerance(tolerance)
+                alg.ToleranceIsAbsoluteOn()
+                alg.SetAbsoluteTolerance(tolerance)
             else:
-                clean.SetTolerance(tolerance)
-        clean.SetInputData(poly_data)
-        clean.Update()
-
-        output = _get_output(clean)
+                alg.SetTolerance(tolerance)
+        alg.SetInputData(poly_data)
+        _update_alg(alg, progress_bar, 'Cleaning')
+        output = _get_output(alg)
 
         # Check output so no segfaults occur
         if output.n_points < 1:
-            raise AssertionError('Clean tolerance is too high. Empty mesh returned.')
+            raise ValueError('Clean tolerance is too high. Empty mesh returned.')
 
         if inplace:
             poly_data.overwrite(output)
         else:
             return output
 
-
     def geodesic(poly_data, start_vertex, end_vertex, inplace=False):
         """Calculate the geodesic path between two vertices using Dijkstra's algorithm.
+
+        This will add an array titled `vtkOriginalPointIds` of the input
+        mesh's point ids to the output mesh.
 
         Parameters
         ----------
@@ -3101,14 +3413,18 @@ class PolyDataFilters(DataSetFilters):
         """
         if start_vertex < 0 or end_vertex > poly_data.n_points - 1:
             raise IndexError('Invalid indices.')
+        if not poly_data.is_all_triangles():
+            raise NotAllTrianglesError("Input mesh for geodesic path must be all triangles.")
 
         dijkstra = vtk.vtkDijkstraGraphGeodesicPath()
         dijkstra.SetInputData(poly_data)
         dijkstra.SetStartVertex(start_vertex)
         dijkstra.SetEndVertex(end_vertex)
         dijkstra.Update()
+        original_ids = vtk_id_list_to_array(dijkstra.GetIdList())
 
         output = _get_output(dijkstra)
+        output["vtkOriginalPointIds"] = original_ids
 
         # Do not copy textures from input
         output.clear_textures()
@@ -3117,7 +3433,6 @@ class PolyDataFilters(DataSetFilters):
             poly_data.overwrite(output)
         else:
             return output
-
 
     def geodesic_distance(poly_data, start_vertex, end_vertex):
         """Calculate the geodesic distance between two vertices using Dijkstra's algorithm.
@@ -3211,7 +3526,6 @@ class PolyDataFilters(DataSetFilters):
 
         return intersection_points, intersection_cells
 
-
     def plot_boundaries(poly_data, edge_color="red", **kwargs):
         """Plot boundaries of a mesh.
 
@@ -3234,7 +3548,6 @@ class PolyDataFilters(DataSetFilters):
         plotter.add_legend()
         return plotter.show()
 
-
     def plot_normals(poly_data, show_mesh=True, mag=1.0, flip=False,
                      use_every=1, **kwargs):
         """Plot the point normals of a mesh."""
@@ -3249,7 +3562,6 @@ class PolyDataFilters(DataSetFilters):
         plotter.add_arrows(poly_data.points[::use_every],
                            normals[::use_every], mag=mag)
         return plotter.show()
-
 
     def remove_points(poly_data, remove, mode='any', keep_scalars=True, inplace=False):
         """Rebuild a mesh by removing points.
@@ -3284,22 +3596,24 @@ class PolyDataFilters(DataSetFilters):
             returned when inplace=False.
 
         """
-        if isinstance(remove, list):
-            remove = np.asarray(remove)
+        remove = np.asarray(remove)
 
-        if remove.dtype == np.bool:
+        # np.asarray will eat anything, so we have to weed out bogus inputs
+        if not issubclass(remove.dtype.type, (np.bool_, np.integer)):
+            raise TypeError('Remove must be either a mask or an integer array-like')
+
+        if remove.dtype == np.bool_:
             if remove.size != poly_data.n_points:
-                raise AssertionError('Mask different size than n_points')
+                raise ValueError('Mask different size than n_points')
             remove_mask = remove
         else:
-            remove_mask = np.zeros(poly_data.n_points, np.bool)
+            remove_mask = np.zeros(poly_data.n_points, np.bool_)
             remove_mask[remove] = True
 
-        try:
-            f = poly_data.faces.reshape(-1, 4)[:, 1:]
-        except:
-            raise Exception('Mesh must consist of only triangles')
+        if not poly_data.is_all_triangles():
+            raise NotAllTrianglesError
 
+        f = poly_data.faces.reshape(-1, 4)[:, 1:]
         vmask = remove_mask.take(f)
         if mode == 'all':
             fmask = ~(vmask).all(1)
@@ -3335,18 +3649,56 @@ class PolyDataFilters(DataSetFilters):
         else:
             return newmesh, ridx
 
-
     def flip_normals(poly_data):
         """Flip normals of a triangular mesh by reversing the point ordering."""
-        if poly_data.faces.size % 4:
-            raise Exception('Can only flip normals on an all triangular mesh')
+        if not poly_data.is_all_triangles:
+            raise NotAllTrianglesError('Can only flip normals on an all triangle mesh')
 
         f = poly_data.faces.reshape((-1, 4))
         f[:, 1:] = f[:, 1:][:, ::-1]
 
+    def delaunay_2d(poly_data, tol=1e-05, alpha=0.0, offset=1.0, bound=False,
+                    inplace=False, edge_source=None, progress_bar=False):
+        """Apply a delaunay 2D filter along the best fitting plane.
 
-    def delaunay_2d(poly_data, tol=1e-05, alpha=0.0, offset=1.0, bound=False, inplace=False):
-        """Apply a delaunay 2D filter along the best fitting plane."""
+        Parameters
+        ----------
+        tol : float
+            Specify a tolerance to control discarding of closely spaced
+            points. This tolerance is specified as a fraction of the diagonal
+            length of the bounding box of the points.
+
+        alpha : float
+            Specify alpha (or distance) value to control output of this
+            filter. For a non-zero alpha value, only edges or triangles
+            contained within a sphere centered at mesh vertices will be
+            output. Otherwise, only triangles will be output.
+
+        offset : float
+            Specify a multiplier to control the size of the initial, bounding
+            Delaunay triangulation.
+
+        bound : bool
+            Boolean controls whether bounding triangulation points (and
+            associated triangles) are included in the output. (These are
+            introduced as an initial triangulation to begin the triangulation
+            process. This feature is nice for debugging output.)
+
+        inplace : bool
+            If True, overwrite this mesh with the triangulated mesh.
+
+        edge_source : pyvista.PolyData, optional
+            Specify the source object used to specify constrained edges and
+            loops. (This is optional.) If set, and lines/polygons are
+            defined, a constrained triangulation is created. The
+            lines/polygons are assumed to reference points in the input point
+            set (i.e. point ids are identical in the input and source). Note
+            that this method does not connect the pipeline. See
+            SetSourceConnection for connecting the pipeline.
+
+        progress_bar : bool, optional
+            Display a progress bar to indicate progress.
+        """
         alg = vtk.vtkDelaunay2D()
         alg.SetProjectionPlaneMode(vtk.VTK_BEST_FITTING_PLANE)
         alg.SetInputDataObject(poly_data)
@@ -3354,16 +3706,18 @@ class PolyDataFilters(DataSetFilters):
         alg.SetAlpha(alpha)
         alg.SetOffset(offset)
         alg.SetBoundingTriangulation(bound)
-        alg.Update()
+        if edge_source is not None:
+            alg.SetSourceData(edge_source)
+        _update_alg(alg, progress_bar, 'Computing 2D Triangulation')
 
-        mesh = _get_output(alg)
+        # Sometimes lines are given in the output. The `.triangulate()` filter cleans those
+        mesh = _get_output(alg).triangulate()
         if inplace:
             poly_data.overwrite(mesh)
         else:
             return mesh
 
-
-    def delauney_2d(poly_data):
+    def delauney_2d(poly_data):  # pragma: no cover
         """Apply a delaunay 2D filter along the best fitting plane.
 
         DEPRECATED. Please see :func:`pyvista.PolyData.delaunay_2d`.
@@ -3371,7 +3725,6 @@ class PolyDataFilters(DataSetFilters):
         """
         raise AttributeError('`delauney_2d` is deprecated because we made a '
                              'spelling mistake. Please use `delaunay_2d`.')
-
 
     def compute_arc_length(poly_data):
         """Compute the arc length over the length of the probed line.
@@ -3389,7 +3742,7 @@ class PolyDataFilters(DataSetFilters):
 
     def project_points_to_plane(poly_data, origin=None, normal=(0,0,1), inplace=False):
         """Project points of this mesh to a plane."""
-        if not isinstance(normal, collections.Iterable) or len(normal) != 3:
+        if not isinstance(normal, (np.ndarray, collections.abc.Sequence)) or len(normal) != 3:
             raise TypeError('Normal must be a length three vector')
         if origin is None:
             origin = np.array(poly_data.center) - np.array(normal)*poly_data.length/2.
@@ -3406,7 +3759,6 @@ class PolyDataFilters(DataSetFilters):
         if not inplace:
             return mesh
         return
-
 
     def ribbon(poly_data, width=None, scalars=None, angle=0.0, factor=2.0,
                normal=None, tcoords=False, preference='points'):
@@ -3457,7 +3809,7 @@ class PolyDataFilters(DataSetFilters):
         alg.SetAngle(angle)
         if scalars is not None:
             alg.SetVaryWidth(True)
-            alg.SetInputArrayToProcess(0, 0, 0, field, scalars) # args: (idx, port, connection, field, name)
+            alg.SetInputArrayToProcess(0, 0, 0, field.value, scalars) # args: (idx, port, connection, field, name)
             alg.SetWidthFactor(factor)
         else:
             alg.SetVaryWidth(False)
@@ -3475,38 +3827,159 @@ class PolyDataFilters(DataSetFilters):
         alg.Update()
         return _get_output(alg)
 
+    def extrude(poly_data, vector, inplace=False, progress_bar=False):
+        """Sweep polygonal data creating a "skirt" from free edges.
 
+        This will create a line from vertices.
+
+        This takes polygonal data as input and generates polygonal
+        data on output. The input dataset is swept according to some
+        extrusion function and creates new polygonal primitives. These
+        primitives form a "skirt" or swept surface. For example,
+        sweeping a line results in a quadrilateral, and sweeping a
+        triangle creates a "wedge".
+
+        There are a number of control parameters for this filter. You
+        can control whether the sweep of a 2D object (i.e., polygon or
+        triangle strip) is capped with the generating geometry via the
+        "Capping" parameter.
+
+        The skirt is generated by locating certain topological
+        features. Free edges (edges of polygons or triangle strips
+        only used by one polygon or triangle strips) generate
+        surfaces. This is true also of lines or polylines. Vertices
+        generate lines.
+
+        This filter can be used to create 3D fonts, 3D irregular bar
+        charts, or to model 2 1/2D objects like punched plates. It
+        also can be used to create solid objects from 2D polygonal
+        meshes.
+
+        Parameters
+        ----------
+        mesh : pyvista.PolyData
+            Mesh to extrude.
+
+        vector : np.ndarray or list
+            Direction and length to extrude the mesh in.
+
+        inplace : bool, optional
+            Overwrites the original mesh inplace.
+
+        progress_bar : bool, optional
+            Display a progress bar to indicate progress.
+
+        Examples
+        --------
+        Extrude a half arc circle
+
+        >>> import pyvista
+        >>> arc = pyvista.CircularArc([-1, 0, 0], [1, 0, 0], [0, 0, 0])
+        >>> mesh = arc.extrude([0, 0, 1])
+        >>> mesh.plot()  # doctest:+SKIP
+        """
+        alg = vtk.vtkLinearExtrusionFilter()
+        alg.SetExtrusionTypeToVectorExtrusion()
+        alg.SetVector(*vector)
+        alg.SetInputData(poly_data)
+        _update_alg(alg, progress_bar, 'Extruding')
+        output = pyvista.wrap(alg.GetOutput())
+        if not inplace:
+            return output
+        poly_data.overwrite(output)
+
+    def strip(poly_data, join=False, max_length=1000, pass_cell_data=False,
+              pass_cell_ids=False, pass_point_ids=False):
+        """Strip poly data cells.
+
+        Generates triangle strips and/or poly-lines from input polygons,
+        triangle strips, and lines.
+
+        Polygons are assembled into triangle strips only if they are
+        triangles; other types of polygons are passed through to the output
+        and not stripped. (Use  ``triangulate`` filter to triangulate
+        non-triangular polygons prior to running this filter if you need to
+        strip all the data.) The filter will pass through (to the output)
+        vertices if they are present in the input polydata. Also note that if
+        triangle strips or polylines are defined in the input they are passed
+        through and not joined nor extended. (If you wish to strip these use
+        ``triangulate`` filter to fragment the input into triangles and lines
+        prior to running this filter.)
+
+        Parameters
+        ----------
+        join : bool
+            If on, the output polygonal segments will be joined if they are
+            contiguous. This is useful after slicing a surface. The default
+            is off.
+
+        max_length : int
+            Specify the maximum number of triangles in a triangle strip,
+            and/or the maximum number of lines in a poly-line.
+
+        pass_cell_data : bool
+            Enable/Disable passing of the CellData in the input to the output
+            as FieldData. Note the field data is transformed.
+
+        pass_cell_ids : bool
+            If on, the output polygonal dataset will have a celldata array
+            that holds the cell index of the original 3D cell that produced
+            each output cell. This is useful for picking. The default is off
+            to conserve memory.
+
+        pass_point_ids : bool
+            If on, the output polygonal dataset will have a pointdata array
+            that holds the point index of the original vertex that produced
+            each output vertex. This is useful for picking. The default is
+            off to conserve memory.
+
+        Examples
+        --------
+        >>> from pyvista import examples
+        >>> mesh = examples.load_airplane()
+        >>> slc = mesh.slice(normal='z', origin=(0,0,-10))
+        >>> stripped = slc.strip()
+        >>> stripped.n_cells
+        1
+        """
+        alg = vtk.vtkStripper()
+        alg.SetInputDataObject(poly_data)
+        alg.SetJoinContiguousSegments(join)
+        alg.SetMaximumLength(max_length)
+        alg.SetPassCellDataAsFieldData(pass_cell_data)
+        alg.SetPassThroughCellIds(pass_cell_ids)
+        alg.SetPassThroughPointIds(pass_point_ids)
+        alg.Update()
+        return _get_output(alg)
+
+
+@abstract_class
 class UnstructuredGridFilters(DataSetFilters):
     """An internal class to manage filtes/algorithms for unstructured grid datasets."""
 
-    def __new__(cls, *args, **kwargs):
-        """Allocate memory for the unstructured grid."""
-        if cls is UnstructuredGridFilters:
-            raise TypeError("pyvista.UnstructuredGridFilters is an abstract class and may not be instantiated.")
-        return object.__new__(cls)
-
-    def delaunay_2d(ugrid, tol=1e-05, alpha=0.0, offset=1.0, bound=False):
+    def delaunay_2d(ugrid, tol=1e-05, alpha=0.0, offset=1.0, bound=False,
+                    progress_bar=False):
         """Apply a delaunay 2D filter along the best fitting plane.
 
         This extracts the grid's points and performs the triangulation on those alone.
 
+        Parameters
+        ----------
+        progress_bar : bool, optional
+            Display a progress bar to indicate progress.
         """
         return pyvista.PolyData(ugrid.points).delaunay_2d(tol=tol, alpha=alpha,
                                                           offset=offset,
-                                                          bound=bound)
+                                                          bound=bound,
+                                                          progress_bar=progress_bar)
 
 
+@abstract_class
 class UniformGridFilters(DataSetFilters):
     """An internal class to manage filtes/algorithms for uniform grid datasets."""
 
-    def __new__(cls, *args, **kwargs):
-        """Allocate memory for the uniform grid."""
-        if cls is UniformGridFilters:
-            raise TypeError("pyvista.UniformGridFilters is an abstract class and may not be instantiated.")
-        return object.__new__(cls)
-
     def gaussian_smooth(dataset, radius_factor=1.5, std_dev=2.,
-                        scalars=None, preference='points'):
+                        scalars=None, preference='points', progress_bar=False):
         """Smooth the data with a Gaussian kernel.
 
         Parameters
@@ -3524,6 +3997,8 @@ class UniformGridFilters(DataSetFilters):
             When scalars is specified, this is the preferred array type to
             search for in the dataset.  Must be either ``'point'`` or ``'cell'``
 
+        progress_bar : bool, optional
+            Display a progress bar to indicate progress.
         """
         alg = vtk.vtkImageGaussianSmooth()
         alg.SetInputDataObject(dataset)
@@ -3531,14 +4006,64 @@ class UniformGridFilters(DataSetFilters):
             field, scalars = dataset.active_scalars_info
         else:
             _, field = dataset.get_array(scalars, preference=preference, info=True)
-        alg.SetInputArrayToProcess(0, 0, 0, field, scalars) # args: (idx, port, connection, field, name)
-        if isinstance(radius_factor, collections.Iterable):
+        alg.SetInputArrayToProcess(0, 0, 0, field.value, scalars) # args: (idx, port, connection, field, name)
+        if isinstance(radius_factor, collections.abc.Iterable):
             alg.SetRadiusFactors(radius_factor)
         else:
             alg.SetRadiusFactors(radius_factor, radius_factor, radius_factor)
-        if isinstance(std_dev, collections.Iterable):
+        if isinstance(std_dev, collections.abc.Iterable):
             alg.SetStandardDeviations(std_dev)
         else:
             alg.SetStandardDeviations(std_dev, std_dev, std_dev)
-        alg.Update()
+        _update_alg(alg, progress_bar, 'Performing Gaussian Smoothing')
         return _get_output(alg)
+
+    def extract_subset(dataset, voi, rate=(1, 1, 1), boundary=False):
+        """Select piece (e.g., volume of interest).
+
+        To use this filter set the VOI ivar which are i-j-k min/max indices
+        that specify a rectangular region in the data. (Note that these are
+        0-offset.) You can also specify a sampling rate to subsample the
+        data.
+
+        Typical applications of this filter are to extract a slice from a
+        volume for image processing, subsampling large volumes to reduce data
+        size, or extracting regions of a volume with interesting data.
+
+        Parameters
+        ----------
+        voi : tuple(int)
+            Length 6 iterable of ints: ``(xmin, xmax, ymin, ymax, zmin, zmax)``.
+            These bounds specify the volume of interest in i-j-k min/max
+            indices.
+
+        rate : tuple(int)
+            Length 3 iterable of ints: ``(xrate, yrate, zrate)``.
+            Default: ``(1, 1, 1)``
+
+        boundary : bool
+            Control whether to enforce that the "boundary" of the grid is
+            output in the subsampling process. (This only has effect
+            when the rate in any direction is not equal to 1). When
+            this is on, the subsampling will always include the boundary of
+            the grid even though the sample rate is not an even multiple of
+            the grid dimensions. (By default this is off.)
+        """
+        alg = vtk.vtkExtractVOI()
+        alg.SetVOI(voi)
+        alg.SetInputDataObject(dataset)
+        alg.SetSampleRate(rate)
+        alg.SetIncludeBoundary(boundary)
+        alg.Update()
+        result = _get_output(alg)
+        # Adjust for the confusing issue with the extents
+        #   see https://gitlab.kitware.com/vtk/vtk/-/issues/17938
+        fixed = pyvista.UniformGrid()
+        fixed.origin = result.bounds[::2]
+        fixed.spacing = result.spacing
+        fixed.dimensions = result.dimensions
+        fixed.point_arrays.update(result.point_arrays)
+        fixed.cell_arrays.update(result.cell_arrays)
+        fixed.field_arrays.update(result.field_arrays)
+        fixed.copy_meta_from(result)
+        return fixed

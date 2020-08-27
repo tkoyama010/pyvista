@@ -55,3 +55,11 @@ def test_itk_plotting_class_npndarray_scalars():
     pl.add_mesh(SPHERE, scalars=SPHERE.points[:, 0])
     viewer = pl.show()
     assert isinstance(viewer, itkwidgets.Viewer)
+
+@pytest.mark.skipif(NO_PLOTTING or not HAS_ITK, reason="Requires system to support plotting and have itkwidgets.")
+def test_itk_add_points():
+    n = 10
+    pl = pyvista.PlotterITK()
+    points = np.random.random((n, 3))
+    pl.add_points(points, scalars=np.arange(10), cmap=None, flip_scalars=True)
+    pl.show()

@@ -59,7 +59,7 @@ class PlotterITK():
         """
         self._actors.append(actor)
 
-    def add_points(self, points, color=None):
+    def add_points(self, points, color=None, scalars=None, flip_scalars=False, cmap=None):
         """Add points to plotting object.
 
         Parameters
@@ -74,6 +74,31 @@ class PlotterITK():
             color='w'
             color=[1, 1, 1]
             color='#FFFFFF'
+
+        scalars : str or numpy.ndarray, optional
+            Scalars used to "color" the mesh.  Accepts a string name of an
+            array that is present on the mesh or an array equal
+            to the number of cells or the number of points in the
+            mesh.  Array should be sized as a single vector. If both
+            ``color`` and ``scalars`` are ``None``, then the active scalars are
+            used.
+
+        flip_scalars : bool, optional
+            Flip direction of cmap. Most colormaps allow ``*_r`` suffix to do
+            this as well.
+
+        cmap : str, list, optional
+           Name of the Matplotlib colormap to us when mapping the ``scalars``.
+           See available Matplotlib colormaps.  Only applicable for when
+           displaying ``scalars``. Requires Matplotlib to be installed.
+           ``colormap`` is also an accepted alias for this. If ``colorcet`` or
+           ``cmocean`` are installed, their colormaps can be specified by name.
+
+            You can also specify a list of colors to override an
+            existing colormap with a custom one.  For example, to
+            create a three color colormap you might specify
+            ``['green', 'red', 'blue']``
+
         """
         if pv.is_pyvista_dataset(points):
             point_array = points.points

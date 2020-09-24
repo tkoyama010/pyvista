@@ -195,6 +195,7 @@ for 3D visualization in our `external examples list <./external_examples.html>`_
 
    getting-started/installation
    getting-started/what-is-a-mesh
+   getting-started/data-arrays.rst
    getting-started/simple
    examples/index
    external_examples

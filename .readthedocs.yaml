@@ -12,13 +12,12 @@ build:
     - git-restore-mtime
     - xvfb
     - aria2c
-  commands:
-    - pip install -e . --no-deps
-    - pip install -r requirements_docs.txt
-    - export DISPLAY=:99.0
-    - export PYVISTA_OFF_SCREEN=true
-    - Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 &
-    - sleep 3
+  jobs:
+    post_install:
+      - export DISPLAY=:99.0
+      - export PYVISTA_OFF_SCREEN=true
+      - Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 &
+      - sleep 3
 
 # Build from the doc/ directory with Sphinx
 sphinx:

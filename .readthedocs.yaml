@@ -11,7 +11,6 @@ build:
     - pandoc
     - git-restore-mtime
     - xvfb
-    - aria2c
   jobs:
     post_install:
       - export DISPLAY=:99.0

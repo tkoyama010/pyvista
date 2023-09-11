@@ -21,6 +21,7 @@ import pyvista
 from pyvista.core.errors import PyVistaDeprecationWarning
 from pyvista.core.utilities.docs import linkcode_resolve, pv_html_page_context  # noqa: F401
 
+pyvista.start_xvfb()
 # Manage errors
 pyvista.set_error_output_file("errors.txt")
 # Ensure that offscreen rendering is used for docs generation

@@ -86,6 +86,7 @@ extensions = [
     "sphinxcontrib.asciinema",
 ]
 autodoc_typehints = 'description'
+autoapi_dirs = ['../../pyvista']
 
 # Configuration of pyvista.ext.coverage
 coverage_additional_modules = [
